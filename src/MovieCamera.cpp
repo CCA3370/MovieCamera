@@ -54,6 +54,11 @@ struct CameraShot {
     float zoom;
     float duration;          // How long this shot lasts (3-5 seconds)
     std::string name;
+    
+    // Camera drift parameters (how the camera moves during the shot)
+    float driftX, driftY, driftZ;          // Position drift per second
+    float driftPitch, driftHeading, driftRoll;  // Rotation drift per second
+    float driftZoom;                        // Zoom drift per second (for cockpit)
 };
 
 // Plugin Global State
@@ -64,8 +69,8 @@ static bool g_functionPaused = false;    // Temporarily paused due to mouse move
 // Settings
 static float g_delaySeconds = 60.0f;      // Delay before auto-activation (seconds)
 static float g_autoAltFt = 18000.0f;      // Altitude threshold for auto mode (feet)
-static float g_shotMinDuration = 3.0f;
-static float g_shotMaxDuration = 5.0f;
+static float g_shotMinDuration = 6.0f;    // Minimum shot duration (longer for cinematic drift)
+static float g_shotMaxDuration = 15.0f;   // Maximum shot duration (longer for cinematic drift)
 
 // Mouse tracking
 static int g_lastMouseX = 0;
@@ -74,9 +79,11 @@ static float g_mouseIdleTime = 0.0f;      // Time since last mouse movement
 
 // Camera control state
 static float g_currentShotTime = 0.0f;
+static float g_shotElapsedTime = 0.0f;    // Time elapsed in current shot (for drift calculation)
 static int g_currentShotIndex = -1;
 static int g_consecutiveSameTypeCount = 0;
 static CameraType g_lastShotType = CameraType::Cockpit;
+static CameraShot g_currentShot;           // Store current shot for drift calculation
 
 // Smooth transition state
 static float g_transitionProgress = 0.0f;
@@ -241,77 +248,123 @@ void SettingsWindow::buildInterface() {
 }
 
 /**
- * Initialize predefined camera shots
+ * Initialize predefined camera shots with cinematic movement
+ * Each shot includes drift parameters for smooth multi-axis camera motion
  */
 static void InitializeCameraShots() {
     // Cockpit shots - various instrument views and pilot perspective shots
+    // Drift values create slow, cinematic camera movements
+    // For cockpit: subtle position/rotation drift + zoom breathing for DOF effect
     g_cockpitShots.clear();
     
-    // Center panel view
-    g_cockpitShots.push_back({CameraType::Cockpit, 0.0f, 0.2f, 0.3f, -5.0f, 0.0f, 0.0f, 1.2f, 4.0f, "Center Panel"});
+    // Center panel view - slow zoom in with slight drift
+    // x, y, z, pitch, heading, roll, zoom, duration, name, driftX, driftY, driftZ, driftPitch, driftHeading, driftRoll, driftZoom
+    g_cockpitShots.push_back({CameraType::Cockpit, 0.0f, 0.15f, 0.4f, -8.0f, 0.0f, 0.0f, 1.0f, 8.0f, "Center Panel",
+                              0.0f, 0.01f, 0.02f, 0.2f, 0.0f, 0.0f, 0.03f});
     
-    // Left panel (throttle/navigation)
-    g_cockpitShots.push_back({CameraType::Cockpit, -0.3f, 0.1f, 0.2f, -10.0f, -30.0f, 0.0f, 1.5f, 4.0f, "Left Panel"});
+    // Left panel (throttle/navigation) - gentle pan right with zoom
+    g_cockpitShots.push_back({CameraType::Cockpit, -0.25f, 0.1f, 0.3f, -12.0f, -25.0f, 0.0f, 1.2f, 7.0f, "Left Panel",
+                              0.01f, 0.0f, 0.01f, 0.15f, 1.0f, 0.0f, 0.025f});
     
-    // Right panel (radios/autopilot)
-    g_cockpitShots.push_back({CameraType::Cockpit, 0.3f, 0.1f, 0.2f, -10.0f, 30.0f, 0.0f, 1.5f, 4.0f, "Right Panel"});
+    // Right panel (radios/autopilot) - gentle pan left with zoom
+    g_cockpitShots.push_back({CameraType::Cockpit, 0.25f, 0.1f, 0.3f, -12.0f, 25.0f, 0.0f, 1.2f, 7.0f, "Right Panel",
+                              -0.01f, 0.0f, 0.01f, 0.15f, -1.0f, 0.0f, 0.025f});
     
-    // Overhead panel view
-    g_cockpitShots.push_back({CameraType::Cockpit, 0.0f, 0.4f, 0.1f, -60.0f, 0.0f, 0.0f, 1.3f, 3.5f, "Overhead Panel"});
+    // Overhead panel view - slow tilt down
+    g_cockpitShots.push_back({CameraType::Cockpit, 0.0f, 0.35f, 0.15f, -55.0f, 0.0f, 0.0f, 1.1f, 6.0f, "Overhead Panel",
+                              0.0f, -0.01f, 0.01f, 1.5f, 0.0f, 0.0f, 0.02f});
     
-    // PFD closeup
-    g_cockpitShots.push_back({CameraType::Cockpit, -0.15f, 0.0f, 0.5f, 0.0f, -10.0f, 0.0f, 2.0f, 4.5f, "PFD View"});
+    // PFD closeup - slow zoom with subtle drift
+    g_cockpitShots.push_back({CameraType::Cockpit, -0.12f, 0.05f, 0.45f, -3.0f, -8.0f, 0.0f, 1.6f, 8.0f, "PFD View",
+                              0.005f, 0.005f, 0.015f, 0.1f, 0.3f, 0.0f, 0.04f});
     
-    // ND/MFD view
-    g_cockpitShots.push_back({CameraType::Cockpit, 0.15f, 0.0f, 0.5f, 0.0f, 10.0f, 0.0f, 2.0f, 4.5f, "ND/MFD View"});
+    // ND/MFD view - slow zoom with subtle drift  
+    g_cockpitShots.push_back({CameraType::Cockpit, 0.12f, 0.05f, 0.45f, -3.0f, 8.0f, 0.0f, 1.6f, 8.0f, "ND/MFD View",
+                              -0.005f, 0.005f, 0.015f, 0.1f, -0.3f, 0.0f, 0.04f});
     
-    // Looking out front window
-    g_cockpitShots.push_back({CameraType::Cockpit, 0.0f, 0.3f, -0.2f, 5.0f, 0.0f, 0.0f, 1.0f, 5.0f, "Front Window"});
+    // Pilot's eye view looking out - subtle look around
+    g_cockpitShots.push_back({CameraType::Cockpit, -0.1f, 0.25f, -0.1f, 3.0f, 5.0f, 0.0f, 0.9f, 10.0f, "Pilot View",
+                              0.005f, 0.0f, 0.0f, 0.0f, 0.8f, 0.0f, 0.0f});
     
-    // Side window left
-    g_cockpitShots.push_back({CameraType::Cockpit, -0.4f, 0.2f, -0.1f, 0.0f, -90.0f, 0.0f, 1.0f, 4.0f, "Left Window"});
+    // Co-pilot perspective - looking at captain's side
+    g_cockpitShots.push_back({CameraType::Cockpit, 0.35f, 0.2f, 0.0f, 0.0f, -20.0f, 0.0f, 0.95f, 8.0f, "Copilot View",
+                              -0.01f, 0.0f, 0.0f, 0.0f, 0.5f, 0.0f, 0.01f});
     
-    // Side window right  
-    g_cockpitShots.push_back({CameraType::Cockpit, 0.4f, 0.2f, -0.1f, 0.0f, 90.0f, 0.0f, 1.0f, 4.0f, "Right Window"});
+    // Looking out left window - slow pan
+    g_cockpitShots.push_back({CameraType::Cockpit, -0.35f, 0.15f, 0.0f, 2.0f, -75.0f, 0.0f, 0.85f, 9.0f, "Left Window",
+                              0.0f, 0.01f, 0.0f, -0.3f, 2.0f, 0.0f, 0.0f});
     
-    // External shots - various external angles
+    // Looking out right window - slow pan
+    g_cockpitShots.push_back({CameraType::Cockpit, 0.35f, 0.15f, 0.0f, 2.0f, 75.0f, 0.0f, 0.85f, 9.0f, "Right Window",
+                              0.0f, 0.01f, 0.0f, -0.3f, -2.0f, 0.0f, 0.0f});
+    
+    // Pedestal/center console view
+    g_cockpitShots.push_back({CameraType::Cockpit, 0.0f, 0.0f, 0.35f, -35.0f, 0.0f, 0.0f, 1.4f, 6.0f, "Pedestal View",
+                              0.0f, 0.01f, 0.01f, 0.5f, 0.0f, 0.0f, 0.03f});
+    
+    // External shots - various external angles with cinematic movement
+    // External shots have more pronounced position drift for dynamic feel
     g_externalShots.clear();
     
-    // Front view
-    g_externalShots.push_back({CameraType::External, 0.0f, 2.0f, -30.0f, 5.0f, 180.0f, 0.0f, 1.0f, 4.0f, "Front View"});
+    // Front hero shot - slow rise and zoom
+    g_externalShots.push_back({CameraType::External, 0.0f, 3.0f, -35.0f, 8.0f, 180.0f, 0.0f, 0.9f, 10.0f, "Front Hero",
+                               0.0f, 0.15f, 0.3f, -0.3f, 0.0f, 0.0f, 0.01f});
     
-    // Rear view
-    g_externalShots.push_back({CameraType::External, 0.0f, 3.0f, 40.0f, 10.0f, 0.0f, 0.0f, 1.0f, 4.5f, "Rear View"});
+    // Rear chase - following behind
+    g_externalShots.push_back({CameraType::External, 0.0f, 4.0f, 45.0f, 12.0f, 0.0f, 0.0f, 0.85f, 10.0f, "Rear Chase",
+                               0.0f, 0.1f, -0.2f, -0.2f, 0.0f, 0.0f, 0.0f});
     
-    // Left side
-    g_externalShots.push_back({CameraType::External, -25.0f, 0.0f, 0.0f, 0.0f, 90.0f, 0.0f, 1.0f, 4.0f, "Left Side"});
+    // Left flyby - dramatic side sweep
+    g_externalShots.push_back({CameraType::External, -30.0f, 2.0f, 10.0f, 3.0f, 85.0f, 0.0f, 0.9f, 12.0f, "Left Flyby",
+                               0.4f, 0.08f, -0.5f, 0.0f, 0.8f, 0.0f, 0.0f});
     
-    // Right side
-    g_externalShots.push_back({CameraType::External, 25.0f, 0.0f, 0.0f, 0.0f, -90.0f, 0.0f, 1.0f, 4.0f, "Right Side"});
+    // Right flyby - dramatic side sweep
+    g_externalShots.push_back({CameraType::External, 30.0f, 2.0f, 10.0f, 3.0f, -85.0f, 0.0f, 0.9f, 12.0f, "Right Flyby",
+                               -0.4f, 0.08f, -0.5f, 0.0f, -0.8f, 0.0f, 0.0f});
     
-    // Top view
-    g_externalShots.push_back({CameraType::External, 0.0f, 30.0f, 5.0f, 75.0f, 0.0f, 0.0f, 1.0f, 3.5f, "Top View"});
+    // High orbit - circling view (heading drift creates orbit effect)
+    g_externalShots.push_back({CameraType::External, 0.0f, 40.0f, 20.0f, 65.0f, 0.0f, 0.0f, 0.8f, 15.0f, "High Orbit",
+                               0.0f, 0.05f, 0.0f, 0.0f, 2.5f, 0.0f, 0.0f});
     
-    // Bottom front view
-    g_externalShots.push_back({CameraType::External, 0.0f, -10.0f, -20.0f, -30.0f, 180.0f, 0.0f, 1.0f, 4.0f, "Bottom Front"});
+    // Low angle front - dramatic upward shot
+    g_externalShots.push_back({CameraType::External, 0.0f, -8.0f, -25.0f, -25.0f, 180.0f, 0.0f, 0.95f, 8.0f, "Low Angle Front",
+                               0.0f, 0.12f, 0.15f, 0.5f, 0.0f, 0.0f, 0.0f});
     
-    // Quarter front left
-    g_externalShots.push_back({CameraType::External, -20.0f, 5.0f, -20.0f, 10.0f, 135.0f, 0.0f, 1.0f, 4.5f, "Quarter Front Left"});
+    // Quarter front left - cinematic approach
+    g_externalShots.push_back({CameraType::External, -25.0f, 6.0f, -25.0f, 12.0f, 140.0f, 0.0f, 0.88f, 10.0f, "Quarter FL",
+                               0.2f, 0.08f, 0.25f, -0.15f, -1.0f, 0.0f, 0.0f});
     
-    // Quarter front right
-    g_externalShots.push_back({CameraType::External, 20.0f, 5.0f, -20.0f, 10.0f, -135.0f, 0.0f, 1.0f, 4.5f, "Quarter Front Right"});
+    // Quarter front right - cinematic approach
+    g_externalShots.push_back({CameraType::External, 25.0f, 6.0f, -25.0f, 12.0f, -140.0f, 0.0f, 0.88f, 10.0f, "Quarter FR",
+                               -0.2f, 0.08f, 0.25f, -0.15f, 1.0f, 0.0f, 0.0f});
     
-    // Quarter rear left
-    g_externalShots.push_back({CameraType::External, -20.0f, 8.0f, 30.0f, 15.0f, 45.0f, 0.0f, 1.0f, 4.0f, "Quarter Rear Left"});
+    // Quarter rear left - departure shot
+    g_externalShots.push_back({CameraType::External, -25.0f, 10.0f, 35.0f, 18.0f, 50.0f, 0.0f, 0.85f, 10.0f, "Quarter RL",
+                               0.15f, 0.05f, -0.25f, -0.2f, -0.5f, 0.0f, 0.0f});
     
-    // Quarter rear right
-    g_externalShots.push_back({CameraType::External, 20.0f, 8.0f, 30.0f, 15.0f, -45.0f, 0.0f, 1.0f, 4.0f, "Quarter Rear Right"});
+    // Quarter rear right - departure shot
+    g_externalShots.push_back({CameraType::External, 25.0f, 10.0f, 35.0f, 18.0f, -50.0f, 0.0f, 0.85f, 10.0f, "Quarter RR",
+                               -0.15f, 0.05f, -0.25f, -0.2f, 0.5f, 0.0f, 0.0f});
     
-    // Wing view left
-    g_externalShots.push_back({CameraType::External, -15.0f, 2.0f, 5.0f, 5.0f, 70.0f, 0.0f, 1.2f, 4.0f, "Wing Left"});
+    // Wing tip left - close wing view
+    g_externalShots.push_back({CameraType::External, -18.0f, 3.0f, 5.0f, 8.0f, 65.0f, 0.0f, 1.05f, 8.0f, "Wing Left",
+                               0.08f, 0.03f, -0.1f, 0.0f, 0.5f, 0.0f, 0.0f});
     
-    // Wing view right
-    g_externalShots.push_back({CameraType::External, 15.0f, 2.0f, 5.0f, 5.0f, -70.0f, 0.0f, 1.2f, 4.0f, "Wing Right"});
+    // Wing tip right - close wing view
+    g_externalShots.push_back({CameraType::External, 18.0f, 3.0f, 5.0f, 8.0f, -65.0f, 0.0f, 1.05f, 8.0f, "Wing Right",
+                               -0.08f, 0.03f, -0.1f, 0.0f, -0.5f, 0.0f, 0.0f});
+    
+    // Engine close-up left
+    g_externalShots.push_back({CameraType::External, -12.0f, 1.0f, 0.0f, 5.0f, 80.0f, 0.0f, 1.3f, 7.0f, "Engine L",
+                               0.05f, 0.02f, -0.08f, 0.0f, 0.3f, 0.0f, 0.0f});
+    
+    // Engine close-up right
+    g_externalShots.push_back({CameraType::External, 12.0f, 1.0f, 0.0f, 5.0f, -80.0f, 0.0f, 1.3f, 7.0f, "Engine R",
+                               -0.05f, 0.02f, -0.08f, 0.0f, -0.3f, 0.0f, 0.0f});
+    
+    // Tail view - looking back at vertical stabilizer
+    g_externalShots.push_back({CameraType::External, 0.0f, 8.0f, 50.0f, 25.0f, 5.0f, 0.0f, 0.9f, 9.0f, "Tail View",
+                               0.0f, 0.08f, -0.15f, -0.3f, -0.8f, 0.0f, 0.0f});
 }
 
 /**
@@ -454,8 +507,9 @@ static CameraShot SelectNextShot() {
     
     // Select a random shot from the list (avoid same shot twice)
     if (shotList->empty()) {
-        // Fallback
-        return {CameraType::Cockpit, 0, 0, 0, 0, 0, 0, 1.0f, 4.0f, "Default"};
+        // Fallback - include drift values
+        return {CameraType::Cockpit, 0, 0, 0, 0, 0, 0, 1.0f, 4.0f, "Default",
+                0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
     }
     
     int newIndex;
@@ -468,6 +522,10 @@ static CameraShot SelectNextShot() {
     // Get the shot and randomize duration
     CameraShot shot = (*shotList)[newIndex];
     shot.duration = g_shotMinDuration + (static_cast<float>(std::rand()) / RAND_MAX) * (g_shotMaxDuration - g_shotMinDuration);
+    
+    // Store current shot for drift calculation
+    g_currentShot = shot;
+    g_shotElapsedTime = 0.0f;
     
     return shot;
 }
@@ -509,6 +567,7 @@ static void StartCameraControl() {
     g_functionActive = true;
     g_functionPaused = false;
     g_currentShotTime = 0.0f;
+    g_shotElapsedTime = 0.0f;
     g_currentShotIndex = -1;
     g_consecutiveSameTypeCount = 0;
     g_inTransition = false;
@@ -519,13 +578,13 @@ static void StartCameraControl() {
     // Start with a random shot type
     g_lastShotType = (std::rand() % 2 == 0) ? CameraType::Cockpit : CameraType::External;
     
-    // Select the first shot
+    // Select the first shot (this also sets g_currentShot)
     CameraShot firstShot = SelectNextShot();
     
     // Read current camera position for smooth start
     XPLMReadCameraPosition(&g_startPos);
     
-    // Calculate target position
+    // Calculate target position (starting position of the shot)
     float acfX = XPLMGetDataf(g_drLocalX);
     float acfY = XPLMGetDataf(g_drLocalY);
     float acfZ = XPLMGetDataf(g_drLocalZ);
@@ -598,6 +657,7 @@ static void ResumeCameraControl() {
 
 /**
  * Camera control callback
+ * Applies smooth drift motion during shots for cinematic feel
  */
 static int CameraControlCallback(XPLMCameraPosition_t* outCameraPosition, int inIsLosingControl, void* inRefcon) {
     (void)inRefcon;
@@ -606,7 +666,7 @@ static int CameraControlCallback(XPLMCameraPosition_t* outCameraPosition, int in
         return 0;
     }
     
-    // Get current aircraft position
+    // Get current aircraft position and orientation
     float acfX = XPLMGetDataf(g_drLocalX);
     float acfY = XPLMGetDataf(g_drLocalY);
     float acfZ = XPLMGetDataf(g_drLocalZ);
@@ -624,23 +684,36 @@ static int CameraControlCallback(XPLMCameraPosition_t* outCameraPosition, int in
         outCameraPosition->roll = Lerp(g_startPos.roll, g_targetPos.roll, t);
         outCameraPosition->zoom = Lerp(g_startPos.zoom, g_targetPos.zoom, t);
     } else {
-        // Use target position, following aircraft
-        std::vector<CameraShot>* shotList = (g_lastShotType == CameraType::Cockpit) ? &g_cockpitShots : &g_externalShots;
-        if (g_currentShotIndex >= 0 && g_currentShotIndex < static_cast<int>(shotList->size())) {
-            CameraShot& shot = (*shotList)[g_currentShotIndex];
-            
-            float rad = acfHeading * 3.14159f / 180.0f;
-            float cosH = std::cos(rad);
-            float sinH = std::sin(rad);
-            
-            outCameraPosition->x = acfX + shot.x * cosH - shot.z * sinH;
-            outCameraPosition->y = acfY + shot.y;
-            outCameraPosition->z = acfZ + shot.x * sinH + shot.z * cosH;
-            outCameraPosition->pitch = shot.pitch;
-            outCameraPosition->heading = acfHeading + shot.heading;
-            outCameraPosition->roll = shot.roll;
-            outCameraPosition->zoom = shot.zoom;
-        }
+        // Apply shot with cinematic drift
+        // Use stored g_currentShot which contains drift parameters
+        float rad = acfHeading * 3.14159f / 180.0f;
+        float cosH = std::cos(rad);
+        float sinH = std::sin(rad);
+        
+        // Calculate drift offset based on elapsed time in this shot
+        float driftTime = g_shotElapsedTime;
+        
+        // Position drift (relative to aircraft, then transformed to world)
+        float driftedX = g_currentShot.x + g_currentShot.driftX * driftTime;
+        float driftedY = g_currentShot.y + g_currentShot.driftY * driftTime;
+        float driftedZ = g_currentShot.z + g_currentShot.driftZ * driftTime;
+        
+        // Rotation drift
+        float driftedPitch = g_currentShot.pitch + g_currentShot.driftPitch * driftTime;
+        float driftedHeading = g_currentShot.heading + g_currentShot.driftHeading * driftTime;
+        float driftedRoll = g_currentShot.roll + g_currentShot.driftRoll * driftTime;
+        
+        // Zoom drift (for cockpit shots - simulates aperture/DOF breathing)
+        float driftedZoom = g_currentShot.zoom + g_currentShot.driftZoom * driftTime;
+        
+        // Transform position offset from aircraft-relative to world coordinates
+        outCameraPosition->x = acfX + driftedX * cosH - driftedZ * sinH;
+        outCameraPosition->y = acfY + driftedY;
+        outCameraPosition->z = acfZ + driftedX * sinH + driftedZ * cosH;
+        outCameraPosition->pitch = driftedPitch;
+        outCameraPosition->heading = acfHeading + driftedHeading;
+        outCameraPosition->roll = driftedRoll;
+        outCameraPosition->zoom = driftedZoom;
     }
     
     return 1;
@@ -701,8 +774,13 @@ static float FlightLoopCallback(float inElapsedSinceLastCall, float inElapsedTim
             if (g_transitionProgress >= 1.0f) {
                 g_inTransition = false;
                 g_transitionProgress = 0.0f;
+                // Reset elapsed time when transition ends and drift begins
+                g_shotElapsedTime = 0.0f;
             }
         } else {
+            // Accumulate elapsed time for drift calculation
+            g_shotElapsedTime += inElapsedSinceLastCall;
+            
             g_currentShotTime -= inElapsedSinceLastCall;
             if (g_currentShotTime <= 0.0f) {
                 // Time for next shot
@@ -710,7 +788,7 @@ static float FlightLoopCallback(float inElapsedSinceLastCall, float inElapsedTim
                 
                 CameraShot nextShot = SelectNextShot();
                 
-                // Calculate target position
+                // Calculate target position (start position for the new shot)
                 float acfX = XPLMGetDataf(g_drLocalX);
                 float acfY = XPLMGetDataf(g_drLocalY);
                 float acfZ = XPLMGetDataf(g_drLocalZ);
