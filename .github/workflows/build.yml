@@ -101,13 +101,8 @@ jobs:
           cp dist/README.txt package/MovieCamera/
           cp dist/LICENSE.txt package/MovieCamera/
       
-      - name: Create ZIP archive
-        run: |
-          cd package
-          zip -r ../MovieCamera.zip MovieCamera
-      
       - name: Upload final package
         uses: actions/upload-artifact@v4
         with:
           name: MovieCamera
-          path: MovieCamera.zip
+          path: package/MovieCamera
