@@ -56,8 +56,78 @@ static ImGuiKey XPLMVirtualKeyToImGuiKey(int xplmKey) {
         case XPLM_VK_END:       return ImGuiKey_End;
         case XPLM_VK_PRIOR:     return ImGuiKey_PageUp;
         case XPLM_VK_NEXT:      return ImGuiKey_PageDown;
+        // Number keys
+        case XPLM_VK_0:         return ImGuiKey_0;
+        case XPLM_VK_1:         return ImGuiKey_1;
+        case XPLM_VK_2:         return ImGuiKey_2;
+        case XPLM_VK_3:         return ImGuiKey_3;
+        case XPLM_VK_4:         return ImGuiKey_4;
+        case XPLM_VK_5:         return ImGuiKey_5;
+        case XPLM_VK_6:         return ImGuiKey_6;
+        case XPLM_VK_7:         return ImGuiKey_7;
+        case XPLM_VK_8:         return ImGuiKey_8;
+        case XPLM_VK_9:         return ImGuiKey_9;
+        // Letter keys
+        case XPLM_VK_A:         return ImGuiKey_A;
+        case XPLM_VK_B:         return ImGuiKey_B;
+        case XPLM_VK_C:         return ImGuiKey_C;
+        case XPLM_VK_D:         return ImGuiKey_D;
+        case XPLM_VK_E:         return ImGuiKey_E;
+        case XPLM_VK_F:         return ImGuiKey_F;
+        case XPLM_VK_G:         return ImGuiKey_G;
+        case XPLM_VK_H:         return ImGuiKey_H;
+        case XPLM_VK_I:         return ImGuiKey_I;
+        case XPLM_VK_J:         return ImGuiKey_J;
+        case XPLM_VK_K:         return ImGuiKey_K;
+        case XPLM_VK_L:         return ImGuiKey_L;
+        case XPLM_VK_M:         return ImGuiKey_M;
+        case XPLM_VK_N:         return ImGuiKey_N;
+        case XPLM_VK_O:         return ImGuiKey_O;
+        case XPLM_VK_P:         return ImGuiKey_P;
+        case XPLM_VK_Q:         return ImGuiKey_Q;
+        case XPLM_VK_R:         return ImGuiKey_R;
+        case XPLM_VK_S:         return ImGuiKey_S;
+        case XPLM_VK_T:         return ImGuiKey_T;
+        case XPLM_VK_U:         return ImGuiKey_U;
+        case XPLM_VK_V:         return ImGuiKey_V;
+        case XPLM_VK_W:         return ImGuiKey_W;
+        case XPLM_VK_X:         return ImGuiKey_X;
+        case XPLM_VK_Y:         return ImGuiKey_Y;
+        case XPLM_VK_Z:         return ImGuiKey_Z;
         default:                return ImGuiKey_None;
     }
+}
+
+// Helper function to clear all key states when losing keyboard focus
+static void ClearAllKeyStates(ImGuiIO& io) {
+    // Clear all special keys
+    io.AddKeyEvent(ImGuiKey_Backspace, false);
+    io.AddKeyEvent(ImGuiKey_Tab, false);
+    io.AddKeyEvent(ImGuiKey_Enter, false);
+    io.AddKeyEvent(ImGuiKey_Escape, false);
+    io.AddKeyEvent(ImGuiKey_Space, false);
+    io.AddKeyEvent(ImGuiKey_LeftArrow, false);
+    io.AddKeyEvent(ImGuiKey_UpArrow, false);
+    io.AddKeyEvent(ImGuiKey_RightArrow, false);
+    io.AddKeyEvent(ImGuiKey_DownArrow, false);
+    io.AddKeyEvent(ImGuiKey_Delete, false);
+    io.AddKeyEvent(ImGuiKey_Insert, false);
+    io.AddKeyEvent(ImGuiKey_Home, false);
+    io.AddKeyEvent(ImGuiKey_End, false);
+    io.AddKeyEvent(ImGuiKey_PageUp, false);
+    io.AddKeyEvent(ImGuiKey_PageDown, false);
+    // Clear number keys
+    for (int i = ImGuiKey_0; i <= ImGuiKey_9; i++) {
+        io.AddKeyEvent(static_cast<ImGuiKey>(i), false);
+    }
+    // Clear letter keys
+    for (int i = ImGuiKey_A; i <= ImGuiKey_Z; i++) {
+        io.AddKeyEvent(static_cast<ImGuiKey>(i), false);
+    }
+    // Clear modifier keys
+    io.AddKeyEvent(ImGuiMod_Shift, false);
+    io.AddKeyEvent(ImGuiMod_Ctrl, false);
+    io.AddKeyEvent(ImGuiMod_Alt, false);
 }
 
 // size of "frame" around a resizable window, by which its size can be changed
@@ -388,11 +458,8 @@ ImgWindow::updateImgui()
 	else if (!io.WantTextInput && hasKeyboardFocus) {
 		XPLMTakeKeyboardFocus(nullptr);
 		// reset keysdown otherwise we'll think any keys used to defocus the keyboard are still down!
-		// In ImGui 1.87+, use AddKeyEvent to clear key states
-		io.AddKeyEvent(ImGuiKey_Backspace, false);
-		io.AddKeyEvent(ImGuiKey_Tab, false);
-		io.AddKeyEvent(ImGuiKey_Enter, false);
-		io.AddKeyEvent(ImGuiKey_Escape, false);
+		// In ImGui 1.87+, use AddKeyEvent to clear all key states
+		ClearAllKeyStates(io);
 	}
 	mFirstRender = false;
 }
