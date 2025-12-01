@@ -108,7 +108,7 @@ static XPLMDataRef g_drRoll = nullptr;
 static XPLMDataRef g_drHeading = nullptr;
 static XPLMDataRef g_drGroundSpeed = nullptr;
 static XPLMDataRef g_drOnGround = nullptr;
-static XPLMDataRef g_drAltitudeFt = nullptr;
+static XPLMDataRef g_drElevationM = nullptr;  // Elevation in meters (we convert to feet for comparison)
 static XPLMDataRef g_drPilotX = nullptr;
 static XPLMDataRef g_drPilotY = nullptr;
 static XPLMDataRef g_drPilotZ = nullptr;
@@ -378,16 +378,16 @@ static CameraShot SelectNextShot() {
  * Check if auto-activation conditions are met
  */
 static bool CheckAutoConditions() {
-    if (!g_drOnGround || !g_drGroundSpeed || !g_drAltitudeFt) {
+    if (!g_drOnGround || !g_drGroundSpeed || !g_drElevationM) {
         return false;
     }
     
     int onGround = XPLMGetDatai(g_drOnGround);
     float groundSpeed = XPLMGetDataf(g_drGroundSpeed);  // m/s
-    float altitude = XPLMGetDataf(g_drAltitudeFt);
+    float elevationMeters = XPLMGetDataf(g_drElevationM);
     
-    // Convert elevation (meters) to feet for comparison
-    altitude = altitude * 3.28084f;
+    // Convert elevation from meters to feet for comparison with g_autoAltFt
+    float altitudeFt = elevationMeters * 3.28084f;
     
     // Condition 1: On ground and stationary (speed < 1 m/s)
     if (onGround && groundSpeed < 1.0f) {
@@ -395,7 +395,7 @@ static bool CheckAutoConditions() {
     }
     
     // Condition 2: In the air above Auto Alt and mouse idle for Delay time
-    if (!onGround && altitude > g_autoAltFt && g_mouseIdleTime >= g_delaySeconds) {
+    if (!onGround && altitudeFt > g_autoAltFt && g_mouseIdleTime >= g_delaySeconds) {
         return true;
     }
     
@@ -865,7 +865,7 @@ PLUGIN_API int XPluginStart(char* outName, char* outSig, char* outDesc) {
     g_drHeading = XPLMFindDataRef("sim/flightmodel/position/psi");
     g_drGroundSpeed = XPLMFindDataRef("sim/flightmodel/position/groundspeed");
     g_drOnGround = XPLMFindDataRef("sim/flightmodel/failures/onground_any");
-    g_drAltitudeFt = XPLMFindDataRef("sim/flightmodel/position/elevation");
+    g_drElevationM = XPLMFindDataRef("sim/flightmodel/position/elevation");  // Returns meters
     g_drPilotX = XPLMFindDataRef("sim/graphics/view/pilots_head_x");
     g_drPilotY = XPLMFindDataRef("sim/graphics/view/pilots_head_y");
     g_drPilotZ = XPLMFindDataRef("sim/graphics/view/pilots_head_z");
