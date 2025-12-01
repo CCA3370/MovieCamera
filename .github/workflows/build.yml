@@ -2,9 +2,10 @@ name: Build MovieCamera Plugin
 
 on:
   push:
-    branches: [ main, master, 'copilot/**' ]
-  pull_request:
-    branches: [ main, master ]
+    branches:
+      - '*'
+permissions:
+  contents: read
 
 jobs:
   build-linux:
