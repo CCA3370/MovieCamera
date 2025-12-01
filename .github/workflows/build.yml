@@ -3,7 +3,7 @@ name: Build MovieCamera Plugin
 on:
   push:
     branches:
-      - '*'
+      - 'main'
 permissions:
   contents: read
 
