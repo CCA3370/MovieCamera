@@ -18,9 +18,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cmake build-essential libgl1-mesa-dev
       
-      - name: Extract SDK
-        run: unzip XPSDK420.zip
-      
       - name: Configure CMake
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release
       
@@ -38,10 +35,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
-      - name: Extract SDK
-        run: |
-          Expand-Archive -Path XPSDK420.zip -DestinationPath .
-      
       - name: Configure CMake
         run: cmake -B build -A x64
       
@@ -58,9 +51,6 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Extract SDK
-        run: unzip XPSDK420.zip
       
       - name: Configure CMake
         run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="x86_64"

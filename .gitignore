@@ -18,6 +18,7 @@
 *.pdb
 
 # Compiled Dynamic libraries
+# Note: SDK libraries are explicitly included below
 *.so
 *.dylib
 *.dll
@@ -27,6 +28,7 @@
 *.smod
 
 # Compiled Static libraries
+# Note: SDK libraries are explicitly included below
 *.lai
 *.la
 *.a
@@ -46,5 +48,7 @@ build/
 # X-Plane plugin output
 *.xpl
 
-# Extracted SDK (keep the zip file, extract when building)
-SDK/
+# SDK libraries are included in the repository
+# Include SDK library files that would otherwise be ignored
+!SDK/Libraries/Lin/*.so
+!SDK/Libraries/Win/*.lib
