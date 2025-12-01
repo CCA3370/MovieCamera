@@ -38,6 +38,28 @@
 #include <XPLMDisplay.h>
 #include <XPLMGraphics.h>
 
+// Helper function to convert XPLM virtual key codes to ImGuiKey
+static ImGuiKey XPLMVirtualKeyToImGuiKey(int xplmKey) {
+    switch (xplmKey) {
+        case XPLM_VK_BACK:      return ImGuiKey_Backspace;
+        case XPLM_VK_TAB:       return ImGuiKey_Tab;
+        case XPLM_VK_RETURN:    return ImGuiKey_Enter;
+        case XPLM_VK_ESCAPE:    return ImGuiKey_Escape;
+        case XPLM_VK_SPACE:     return ImGuiKey_Space;
+        case XPLM_VK_LEFT:      return ImGuiKey_LeftArrow;
+        case XPLM_VK_UP:        return ImGuiKey_UpArrow;
+        case XPLM_VK_RIGHT:     return ImGuiKey_RightArrow;
+        case XPLM_VK_DOWN:      return ImGuiKey_DownArrow;
+        case XPLM_VK_DELETE:    return ImGuiKey_Delete;
+        case XPLM_VK_INSERT:    return ImGuiKey_Insert;
+        case XPLM_VK_HOME:      return ImGuiKey_Home;
+        case XPLM_VK_END:       return ImGuiKey_End;
+        case XPLM_VK_PRIOR:     return ImGuiKey_PageUp;
+        case XPLM_VK_NEXT:      return ImGuiKey_PageDown;
+        default:                return ImGuiKey_None;
+    }
+}
+
 // size of "frame" around a resizable window, by which its size can be changed
 constexpr int WND_RESIZE_LEFT_WIDTH     = 15;
 constexpr int WND_RESIZE_TOP_WIDTH      =  5;
@@ -89,29 +111,7 @@ ImgWindow::ImgWindow(
 	// we render ourselves, we don't use the DrawListsFunc
 	//io.RenderDrawListsFn = nullptr;
 #endif
-	// set up the Keymap
-	io.KeyMap[ImGuiKey_Tab] = XPLM_VK_TAB;
-	io.KeyMap[ImGuiKey_LeftArrow] = XPLM_VK_LEFT;
-	io.KeyMap[ImGuiKey_RightArrow] = XPLM_VK_RIGHT;
-	io.KeyMap[ImGuiKey_UpArrow] = XPLM_VK_UP;
-	io.KeyMap[ImGuiKey_DownArrow] = XPLM_VK_DOWN;
-	io.KeyMap[ImGuiKey_PageUp] = XPLM_VK_PRIOR;
-	io.KeyMap[ImGuiKey_PageDown] = XPLM_VK_NEXT;
-	io.KeyMap[ImGuiKey_Home] = XPLM_VK_HOME;
-	io.KeyMap[ImGuiKey_End] = XPLM_VK_END;
-	io.KeyMap[ImGuiKey_Insert] = XPLM_VK_INSERT;
-	io.KeyMap[ImGuiKey_Delete] = XPLM_VK_DELETE;
-	io.KeyMap[ImGuiKey_Backspace] = XPLM_VK_BACK;
-	io.KeyMap[ImGuiKey_Space] = XPLM_VK_SPACE;
-    io.KeyMap[ImGuiKey_Enter] = XPLM_VK_RETURN;
-    io.KeyMap[ImGuiKey_Escape] = XPLM_VK_ESCAPE;
-    io.KeyMap[ImGuiKey_KeypadEnter] = XPLM_VK_ENTER;
-	io.KeyMap[ImGuiKey_A] = XPLM_VK_A;
-	io.KeyMap[ImGuiKey_C] = XPLM_VK_C;
-	io.KeyMap[ImGuiKey_V] = XPLM_VK_V;
-	io.KeyMap[ImGuiKey_X] = XPLM_VK_X;
-	io.KeyMap[ImGuiKey_Y] = XPLM_VK_Y;
-	io.KeyMap[ImGuiKey_Z] = XPLM_VK_Z;
+	// Key mapping is no longer needed in ImGui 1.87+, as we use AddKeyEvent() directly
 
 	// disable window rounding since we're not rendering the frame anyway.
 	auto &style = ImGui::GetStyle();
@@ -119,9 +119,9 @@ ImgWindow::ImgWindow(
 
 	// bind the font
 	if (mFontAtlas) {
-        mFontTexture = static_cast<GLuint>(/*reinterpret_cast<intptr_t>*/(io.Fonts->TexID));
+        mFontTexture = static_cast<GLuint>(static_cast<intptr_t>(io.Fonts->TexRef.GetTexID()));
     } else {
-        if (!iFontAtlas || (void * ) iFontAtlas->TexID == nullptr) {
+        if (!iFontAtlas || io.Fonts->TexRef.GetTexID() == ImTextureID_Invalid) {
             // fallback binding if an atlas wasn't explicitly set.
             unsigned char *pixels;
             int width, height;
@@ -147,7 +147,7 @@ ImgWindow::ImgWindow(
                          GL_UNSIGNED_BYTE,
                          pixels);
             //io.Fonts->SetTexID((void *)((intptr_t)(mFontTexture)));
-			io.Fonts->SetTexID(reinterpret_cast<ImTextureID >(static_cast<ImTextureID>(mFontTexture)));
+			io.Fonts->SetTexID(static_cast<ImTextureID>(mFontTexture));
         }
     }
 
@@ -298,7 +298,7 @@ ImgWindow::RenderImGui(ImDrawData *draw_data)
 			if (pcmd->UserCallback)	{
 				pcmd->UserCallback(cmd_list, pcmd);
 			} else {
-			    XPLMBindTexture2d((int)(intptr_t)pcmd->TextureId, 0);
+			    XPLMBindTexture2d((int)(intptr_t)pcmd->GetTexID(), 0);
 
 				// Scissors work in viewport space - must translate the coordinates from ImGui -> Boxels, then Boxels -> Native.
 				//FIXME: it must be possible to apply the scale+transform manually to the projection matrix so we don't need to doublestep.
@@ -388,9 +388,11 @@ ImgWindow::updateImgui()
 	else if (!io.WantTextInput && hasKeyboardFocus) {
 		XPLMTakeKeyboardFocus(nullptr);
 		// reset keysdown otherwise we'll think any keys used to defocus the keyboard are still down!
-		for (auto &key : io.KeysDown) {
-			key = false;
-		}
+		// In ImGui 1.87+, use AddKeyEvent to clear key states
+		io.AddKeyEvent(ImGuiKey_Backspace, false);
+		io.AddKeyEvent(ImGuiKey_Tab, false);
+		io.AddKeyEvent(ImGuiKey_Enter, false);
+		io.AddKeyEvent(ImGuiKey_Escape, false);
 	}
 	mFirstRender = false;
 }
@@ -414,7 +416,7 @@ ImgWindow::DrawWindowCB(XPLMWindowID /* inWindowID */, void *inRefcon)
     // Hack: Reset the Backspace key if in VR (see HandleKeyFuncCB for details)
     if (thisWindow->bResetBackspace) {
         ImGuiIO& io = ImGui::GetIO();
-        io.KeysDown[XPLM_VK_BACK] = false;
+        io.AddKeyEvent(ImGuiKey_Backspace, false);
         thisWindow->bResetBackspace = false;
     }
 }
@@ -558,7 +560,7 @@ ImgWindow::HandleKeyFuncCB(
         // Loosing focus? That's not exactly something ImGui allows us to do...
         // we try convincing ImGui to let it go by sending an [Esc] key
         if (blosingFocus) {
-            io.KeysDown[int(XPLM_VK_ESCAPE)] = true;
+            io.AddKeyEvent(ImGuiKey_Escape, true);
         }
         else
         {
@@ -576,12 +578,16 @@ ImgWindow::HandleKeyFuncCB(
             if (inVirtualKey == XPLM_VK_BACK && !(inFlags & xplm_DownFlag)) {
                 thisWindow->bResetBackspace = true; // have it reset only later in DrawWindowCB
             }
-            else
+            else {
                 // in all normal cases: save the up/down flag as it comes from XP
-                io.KeysDown[int(inVirtualKey)] = (inFlags & xplm_DownFlag) == xplm_DownFlag;
-            io.KeyShift = (inFlags & xplm_ShiftFlag) == xplm_ShiftFlag;
-            io.KeyAlt = (inFlags & xplm_OptionAltFlag) == xplm_OptionAltFlag;
-            io.KeyCtrl = (inFlags & xplm_ControlFlag) == xplm_ControlFlag;
+                ImGuiKey imguiKey = XPLMVirtualKeyToImGuiKey(inVirtualKey);
+                if (imguiKey != ImGuiKey_None) {
+                    io.AddKeyEvent(imguiKey, (inFlags & xplm_DownFlag) == xplm_DownFlag);
+                }
+            }
+            io.AddKeyEvent(ImGuiMod_Shift, (inFlags & xplm_ShiftFlag) == xplm_ShiftFlag);
+            io.AddKeyEvent(ImGuiMod_Alt, (inFlags & xplm_OptionAltFlag) == xplm_OptionAltFlag);
+            io.AddKeyEvent(ImGuiMod_Ctrl, (inFlags & xplm_ControlFlag) == xplm_ControlFlag);
 
             // inKey will only includes printable characters,
             // but also those created with key combinations like @ or {}
