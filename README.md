@@ -1,6 +1,6 @@
 # MovieCamera
 
-A cinematic camera plugin for X-Plane 12 that provides automatic smooth camera movements with transitions between cockpit and external views.
+A cinematic camera plugin for X-Plane 12 that provides automatic smooth camera movements with transitions between cockpit and external views. Features continuous, slow camera drift for a professional film-like experience.
 
 ## Features
 
@@ -21,30 +21,35 @@ Access the plugin from `Plugins > MovieCamera`:
 
 ### Cinematic Camera System
 
-The plugin provides smooth transitions between various camera angles:
+The plugin provides smooth transitions between various camera angles with **continuous multi-axis drift motion** for a cinematic feel:
 
-**Cockpit Views (9 angles):**
-- Center Panel
-- Left Panel (throttle/navigation)
-- Right Panel (radios/autopilot)
-- Overhead Panel
-- PFD View (closeup)
-- ND/MFD View (closeup)
-- Front Window
-- Left Window
-- Right Window
+**Cockpit Views (11 angles):**
+- Center Panel (slow zoom with subtle drift)
+- Left/Right Panel (gentle pan with zoom)
+- Overhead Panel (slow tilt)
+- PFD/ND View (close-up with zoom breathing)
+- Pilot/Copilot View (subtle look-around)
+- Left/Right Window (slow pan)
+- Pedestal View
 
-**External Views (12 angles):**
-- Front View
-- Rear View
-- Left/Right Side Views
-- Top View
-- Bottom Front View
+**External Views (15 angles):**
+- Front Hero Shot (slow rise and approach)
+- Rear Chase (following behind)
+- Left/Right Flyby (dramatic side sweep)
+- High Orbit (circling view)
+- Low Angle Front (dramatic upward)
 - Quarter views (front/rear, left/right)
-- Wing Views (left/right)
+- Wing/Engine close-ups
+- Tail View
+
+### Cinematic Movement Features
+- **Slow Multi-Axis Drift**: After transitioning to a shot, the camera continuously drifts in position (X, Y, Z), rotation (pitch, heading, roll) for a smooth, professional look
+- **Cockpit Zoom Breathing**: In cockpit views, the focal length slowly changes to simulate aperture/depth-of-field effects
+- **Longer Shot Duration**: Default 6-15 seconds per shot for more cinematic pacing
+- **Smooth Transitions**: Ease-in-out cubic transitions between shots
 
 ### Intelligent Shot Switching
-- Each shot lasts 3-5 seconds (configurable)
+- Each shot lasts 6-15 seconds (configurable)
 - Smooth ease-in-out transitions between shots
 - At least 3 consecutive shots of the same type (cockpit or external) before switching to the other type
 
@@ -59,7 +64,7 @@ When mouse movement is detected:
 Configure via `Plugins > MovieCamera > Settings`:
 - **Delay (seconds)**: Time to wait after mouse stops moving before activating/resuming camera (default: 60)
 - **Auto Alt (ft)**: Altitude threshold above which Auto mode can activate (default: 18000)
-- **Shot Duration Min/Max (s)**: Range for random shot duration (default: 3-5 seconds)
+- **Shot Duration Min/Max (s)**: Range for random shot duration (default: 6-15 seconds)
 
 ## Building
 
