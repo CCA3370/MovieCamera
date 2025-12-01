@@ -53,7 +53,7 @@ target_include_directories(MovieCamera PRIVATE
 # Platform-specific settings
 if(WIN32)
     target_link_directories(MovieCamera PRIVATE ${SDK_DIR}/Libraries/Win)
-    target_link_libraries(MovieCamera PRIVATE XPLM_64 XPWidgets_64)
+    target_link_libraries(MovieCamera PRIVATE XPLM_64 XPWidgets_64 opengl32)
     set_target_properties(MovieCamera PROPERTIES
         OUTPUT_NAME "MovieCamera"
         SUFFIX ".xpl"
@@ -61,7 +61,8 @@ if(WIN32)
 elseif(APPLE)
     find_library(XPLM_LIBRARY XPLM PATHS ${SDK_DIR}/Libraries/Mac REQUIRED)
     find_library(XPWIDGETS_LIBRARY XPWidgets PATHS ${SDK_DIR}/Libraries/Mac REQUIRED)
-    target_link_libraries(MovieCamera PRIVATE ${XPLM_LIBRARY} ${XPWIDGETS_LIBRARY})
+    find_library(OPENGL_LIBRARY OpenGL REQUIRED)
+    target_link_libraries(MovieCamera PRIVATE ${XPLM_LIBRARY} ${XPWIDGETS_LIBRARY} ${OPENGL_LIBRARY})
     set_target_properties(MovieCamera PROPERTIES
         OUTPUT_NAME "MovieCamera"
         SUFFIX ".xpl"
