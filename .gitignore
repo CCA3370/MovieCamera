@@ -50,6 +50,9 @@ _codeql_detected_source_root
 # X-Plane plugin output
 *.xpl
 
+# Extracted archives (do not commit)
+imgui-1.92.5/
+
 # SDK libraries are included in the repository
 # Include SDK library files that would otherwise be ignored
 !SDK/Libraries/Lin/*.so
