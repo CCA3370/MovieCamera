@@ -125,9 +125,12 @@ static void ClearAllKeyStates(ImGuiIO& io) {
         io.AddKeyEvent(static_cast<ImGuiKey>(i), false);
     }
     // Clear modifier keys
-    io.AddKeyEvent(ImGuiMod_Shift, false);
-    io.AddKeyEvent(ImGuiMod_Ctrl, false);
-    io.AddKeyEvent(ImGuiMod_Alt, false);
+    io.AddKeyEvent(ImGuiKey_LeftShift, false);
+    io.AddKeyEvent(ImGuiKey_RightShift, false);
+    io.AddKeyEvent(ImGuiKey_LeftCtrl, false);
+    io.AddKeyEvent(ImGuiKey_RightCtrl, false);
+    io.AddKeyEvent(ImGuiKey_LeftAlt, false);
+    io.AddKeyEvent(ImGuiKey_RightAlt, false);
 }
 
 // size of "frame" around a resizable window, by which its size can be changed
@@ -644,17 +647,16 @@ ImgWindow::HandleKeyFuncCB(
             // If Backspace is _released_ ...
             if (inVirtualKey == XPLM_VK_BACK && !(inFlags & xplm_DownFlag)) {
                 thisWindow->bResetBackspace = true; // have it reset only later in DrawWindowCB
-            }
-            else {
+            } else {
                 // in all normal cases: save the up/down flag as it comes from XP
                 ImGuiKey imguiKey = XPLMVirtualKeyToImGuiKey(inVirtualKey);
                 if (imguiKey != ImGuiKey_None) {
                     io.AddKeyEvent(imguiKey, (inFlags & xplm_DownFlag) == xplm_DownFlag);
                 }
             }
-            io.AddKeyEvent(ImGuiMod_Shift, (inFlags & xplm_ShiftFlag) == xplm_ShiftFlag);
-            io.AddKeyEvent(ImGuiMod_Alt, (inFlags & xplm_OptionAltFlag) == xplm_OptionAltFlag);
-            io.AddKeyEvent(ImGuiMod_Ctrl, (inFlags & xplm_ControlFlag) == xplm_ControlFlag);
+            io.AddKeyEvent(ImGuiKey_LeftShift, (inFlags & xplm_ShiftFlag) == xplm_ShiftFlag);
+            io.AddKeyEvent(ImGuiKey_LeftAlt, (inFlags & xplm_OptionAltFlag) == xplm_OptionAltFlag);
+            io.AddKeyEvent(ImGuiKey_LeftCtrl, (inFlags & xplm_ControlFlag) == xplm_ControlFlag);
 
             // inKey will only includes printable characters,
             // but also those created with key combinations like @ or {}
