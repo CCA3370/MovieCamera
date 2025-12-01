@@ -39,3 +39,13 @@
 
 # debug information files
 *.dwo
+
+# Build directory
+build/
+
+# X-Plane plugin output
+*.xpl
+
+# Extracted SDK and imgui (keep the zip files)
+SDK/
+imgui-1.92.5/
