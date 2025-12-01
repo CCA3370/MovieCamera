@@ -21,20 +21,33 @@ add_definitions(-DXPLM200=1 -DXPLM210=1 -DXPLM300=1 -DXPLM301=1 -DXPLM302=1 -DXP
 
 # Paths
 set(SDK_DIR "${CMAKE_SOURCE_DIR}/SDK")
+set(IMGUI_DIR "${CMAKE_SOURCE_DIR}/imgui")
 
 # Source files
 set(PLUGIN_SOURCES
     src/MovieCamera.cpp
+    src/ImgWindow/ImgWindow.cpp
+    src/ImgWindow/ImgFontAtlas.cpp
+)
+
+# ImGui sources
+set(IMGUI_SOURCES
+    ${IMGUI_DIR}/imgui.cpp
+    ${IMGUI_DIR}/imgui_draw.cpp
+    ${IMGUI_DIR}/imgui_tables.cpp
+    ${IMGUI_DIR}/imgui_widgets.cpp
 )
 
 # Create shared library
-add_library(MovieCamera SHARED ${PLUGIN_SOURCES})
+add_library(MovieCamera SHARED ${PLUGIN_SOURCES} ${IMGUI_SOURCES})
 
 # Include directories
 target_include_directories(MovieCamera PRIVATE
     ${SDK_DIR}/CHeaders/XPLM
     ${SDK_DIR}/CHeaders/Widgets
     ${SDK_DIR}/CHeaders/Wrappers
+    ${IMGUI_DIR}
+    ${CMAKE_SOURCE_DIR}/src/ImgWindow
 )
 
 # Platform-specific settings

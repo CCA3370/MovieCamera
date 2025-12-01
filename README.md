@@ -9,7 +9,7 @@ Access the plugin from `Plugins > MovieCamera`:
 - **Auto**: Toggle automatic mode (activates based on flight conditions)
 - **Start**: Manually start camera control
 - **Stop**: Stop camera control
-- **Settings**: Open the settings window
+- **Settings**: Open the settings window (ImGui-based UI)
 
 ### Camera Modes
 
@@ -100,11 +100,20 @@ cmake ..
 make
 ```
 
+## Dependencies
+
+- X-Plane SDK 4.2.0 (XPSDK420.zip in the repository)
+- Dear ImGui (included in `imgui/` directory, based on ImgWindow integration from BetterPushbackMod)
+
 ## Installation
 
 1. Build the plugin to get `MovieCamera.xpl`
 2. Copy `MovieCamera.xpl` to `X-Plane 12/Resources/plugins/MovieCamera/64/`
 3. Restart X-Plane
+
+## Credits
+
+- ImgWindow integration code based on [BetterPushbackMod](https://github.com/olivierbutler/BetterPusbackMod) by Christopher Collins
 
 ## License
 

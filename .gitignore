@@ -46,6 +46,5 @@ build/
 # X-Plane plugin output
 *.xpl
 
-# Extracted SDK and imgui (keep the zip files)
+# Extracted SDK (keep the zip file, extract when building)
 SDK/
-imgui-1.92.5/

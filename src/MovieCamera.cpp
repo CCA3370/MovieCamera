@@ -3,6 +3,8 @@
  * 
  * A cinematic camera plugin that provides automatic camera movements
  * with smooth transitions between cockpit and external views.
+ * 
+ * Uses ImGui for the settings window (based on ImgWindow integration).
  */
 
 #include "XPLMDefs.h"
@@ -14,8 +16,9 @@
 #include "XPLMCamera.h"
 #include "XPLMGraphics.h"
 #include "XPLMUtilities.h"
-#include "XPWidgets.h"
-#include "XPStandardWidgets.h"
+
+#include "ImgWindow.h"
+#include "imgui.h"
 
 #include <cstdlib>
 #include <cstring>
@@ -25,6 +28,7 @@
 #include <string>
 #include <vector>
 #include <algorithm>
+#include <memory>
 
 // Plugin Info
 #define PLUGIN_NAME        "MovieCamera"
@@ -88,14 +92,6 @@ static int g_menuItemStart = -1;
 static int g_menuItemStop = -1;
 static int g_menuItemSettings = -1;
 
-// Settings window (using X-Plane Widgets)
-static XPWidgetID g_settingsWidget = nullptr;
-static XPWidgetID g_delayTextField = nullptr;
-static XPWidgetID g_autoAltTextField = nullptr;
-static XPWidgetID g_shotMinTextField = nullptr;
-static XPWidgetID g_shotMaxTextField = nullptr;
-static XPWidgetID g_statusLabel = nullptr;
-
 // Datarefs
 static XPLMDataRef g_drLatitude = nullptr;
 static XPLMDataRef g_drLongitude = nullptr;
@@ -121,17 +117,26 @@ static XPLMFlightLoopID g_flightLoopId = nullptr;
 static std::vector<CameraShot> g_cockpitShots;
 static std::vector<CameraShot> g_externalShots;
 
+/**
+ * Settings Window using ImgWindow
+ */
+class SettingsWindow : public ImgWindow {
+public:
+    SettingsWindow();
+    virtual ~SettingsWindow() = default;
+    
+protected:
+    void buildInterface() override;
+};
+
+static std::unique_ptr<SettingsWindow> g_settingsWindow;
+
 // Function declarations
 static void InitializeCameraShots();
 static void UpdateMenuState();
 static float FlightLoopCallback(float inElapsedSinceLastCall, float inElapsedTimeSinceLastFlightLoop, int inCounter, void* inRefcon);
 static int CameraControlCallback(XPLMCameraPosition_t* outCameraPosition, int inIsLosingControl, void* inRefcon);
 static void MenuHandler(void* inMenuRef, void* inItemRef);
-static void CreateSettingsWidget();
-static void DestroySettingsWidget();
-static int SettingsWidgetHandler(XPWidgetMessage inMessage, XPWidgetID inWidget, intptr_t inParam1, intptr_t inParam2);
-static void UpdateSettingsFromUI();
-static void UpdateStatusLabel();
 static void StartCameraControl();
 static void StopCameraControl();
 static void PauseCameraControl();
@@ -140,6 +145,100 @@ static bool CheckAutoConditions();
 static CameraShot SelectNextShot();
 static float Lerp(float a, float b, float t);
 static float EaseInOutCubic(float t);
+
+/**
+ * SettingsWindow constructor
+ */
+SettingsWindow::SettingsWindow() :
+    ImgWindow(100, 500, 450, 200, xplm_WindowDecorationRoundRectangle, xplm_WindowLayerFloatingWindows)
+{
+    SetWindowTitle("MovieCamera Settings");
+    SetWindowResizingLimits(350, 300, 500, 400);
+}
+
+/**
+ * Build ImGui interface for settings
+ */
+void SettingsWindow::buildInterface() {
+    ImGui::Text("MovieCamera Settings");
+    ImGui::Separator();
+    ImGui::Spacing();
+    
+    // Delay setting
+    ImGui::Text("Delay (seconds):");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(100);
+    if (ImGui::InputFloat("##delay", &g_delaySeconds, 1.0f, 10.0f, "%.0f")) {
+        if (g_delaySeconds < 1.0f) g_delaySeconds = 1.0f;
+        if (g_delaySeconds > 300.0f) g_delaySeconds = 300.0f;
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("(?)");
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Time to wait after mouse stops moving before activating camera");
+    }
+    
+    ImGui::Spacing();
+    
+    // Auto Altitude setting
+    ImGui::Text("Auto Alt (ft):");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(100);
+    if (ImGui::InputFloat("##autoalt", &g_autoAltFt, 100.0f, 1000.0f, "%.0f")) {
+        if (g_autoAltFt < 0.0f) g_autoAltFt = 0.0f;
+        if (g_autoAltFt > 50000.0f) g_autoAltFt = 50000.0f;
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("(?)");
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Altitude above which Auto mode can activate (feet MSL)");
+    }
+    
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Text("Shot Duration Range:");
+    
+    ImGui::Text("Min (s):");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(80);
+    if (ImGui::InputFloat("##shotmin", &g_shotMinDuration, 0.5f, 1.0f, "%.1f")) {
+        if (g_shotMinDuration < 1.0f) g_shotMinDuration = 1.0f;
+        if (g_shotMinDuration > g_shotMaxDuration) g_shotMinDuration = g_shotMaxDuration;
+    }
+    
+    ImGui::SameLine();
+    ImGui::Text("Max (s):");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(80);
+    if (ImGui::InputFloat("##shotmax", &g_shotMaxDuration, 0.5f, 1.0f, "%.1f")) {
+        if (g_shotMaxDuration < g_shotMinDuration) g_shotMaxDuration = g_shotMinDuration;
+        if (g_shotMaxDuration > 30.0f) g_shotMaxDuration = 30.0f;
+    }
+    
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Text("Status:");
+    
+    const char* modeStr = "Off";
+    if (g_pluginMode == PluginMode::Auto) modeStr = "Auto";
+    else if (g_pluginMode == PluginMode::Manual) modeStr = "Manual";
+    ImGui::Text("Mode: %s", modeStr);
+    
+    const char* stateStr = "Inactive";
+    if (g_functionActive && !g_functionPaused) stateStr = "Active";
+    else if (g_functionActive && g_functionPaused) stateStr = "Paused";
+    ImGui::Text("State: %s", stateStr);
+    
+    ImGui::Text("Mouse Idle: %.1f s", g_mouseIdleTime);
+    
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+    
+    if (ImGui::Button("Close", ImVec2(80, 0))) {
+        SetVisible(false);
+    }
+}
 
 /**
  * Initialize predefined camera shots
@@ -246,6 +345,7 @@ static void UpdateMenuState() {
  * Menu handler callback
  */
 static void MenuHandler(void* inMenuRef, void* inItemRef) {
+    (void)inMenuRef;
     intptr_t menuItem = reinterpret_cast<intptr_t>(inItemRef);
     
     switch (menuItem) {
@@ -276,13 +376,11 @@ static void MenuHandler(void* inMenuRef, void* inItemRef) {
             break;
             
         case 3:  // Settings
-            if (!g_settingsWidget) {
-                CreateSettingsWidget();
-            } else {
-                if (XPIsWidgetVisible(g_settingsWidget)) {
-                    XPHideWidget(g_settingsWidget);
+            if (g_settingsWindow) {
+                if (g_settingsWindow->GetVisible()) {
+                    g_settingsWindow->SetVisible(false);
                 } else {
-                    XPShowWidget(g_settingsWidget);
+                    g_settingsWindow->SetVisible(true);
                 }
             }
             break;
@@ -502,6 +600,8 @@ static void ResumeCameraControl() {
  * Camera control callback
  */
 static int CameraControlCallback(XPLMCameraPosition_t* outCameraPosition, int inIsLosingControl, void* inRefcon) {
+    (void)inRefcon;
+    
     if (inIsLosingControl || !outCameraPosition || !g_functionActive || g_functionPaused) {
         return 0;
     }
@@ -550,6 +650,10 @@ static int CameraControlCallback(XPLMCameraPosition_t* outCameraPosition, int in
  * Flight loop callback for timing and state management
  */
 static float FlightLoopCallback(float inElapsedSinceLastCall, float inElapsedTimeSinceLastFlightLoop, int inCounter, void* inRefcon) {
+    (void)inElapsedTimeSinceLastFlightLoop;
+    (void)inCounter;
+    (void)inRefcon;
+    
     // Check for mouse movement
     int mouseX, mouseY;
     XPLMGetMouseLocation(&mouseX, &mouseY);
@@ -631,216 +735,7 @@ static float FlightLoopCallback(float inElapsedSinceLastCall, float inElapsedTim
         }
     }
     
-    // Update status label if settings window is visible
-    if (g_settingsWidget && XPIsWidgetVisible(g_settingsWidget)) {
-        UpdateStatusLabel();
-    }
-    
     return -1.0f;  // Call every frame
-}
-
-/**
- * Update settings from UI text fields
- */
-static void UpdateSettingsFromUI() {
-    char buffer[64];
-    
-    if (g_delayTextField) {
-        XPGetWidgetDescriptor(g_delayTextField, buffer, sizeof(buffer));
-        float value = static_cast<float>(std::atof(buffer));
-        if (value >= 1.0f && value <= 300.0f) {
-            g_delaySeconds = value;
-        }
-    }
-    
-    if (g_autoAltTextField) {
-        XPGetWidgetDescriptor(g_autoAltTextField, buffer, sizeof(buffer));
-        float value = static_cast<float>(std::atof(buffer));
-        if (value >= 0.0f && value <= 50000.0f) {
-            g_autoAltFt = value;
-        }
-    }
-    
-    if (g_shotMinTextField) {
-        XPGetWidgetDescriptor(g_shotMinTextField, buffer, sizeof(buffer));
-        float value = static_cast<float>(std::atof(buffer));
-        if (value >= 1.0f && value <= 30.0f) {
-            g_shotMinDuration = value;
-        }
-    }
-    
-    if (g_shotMaxTextField) {
-        XPGetWidgetDescriptor(g_shotMaxTextField, buffer, sizeof(buffer));
-        float value = static_cast<float>(std::atof(buffer));
-        if (value >= g_shotMinDuration && value <= 30.0f) {
-            g_shotMaxDuration = value;
-        }
-    }
-}
-
-/**
- * Update status label text
- */
-static void UpdateStatusLabel() {
-    if (!g_statusLabel) return;
-    
-    const char* modeStr = "Off";
-    if (g_pluginMode == PluginMode::Auto) modeStr = "Auto";
-    else if (g_pluginMode == PluginMode::Manual) modeStr = "Manual";
-    
-    const char* stateStr = "Inactive";
-    if (g_functionActive && !g_functionPaused) stateStr = "Active";
-    else if (g_functionActive && g_functionPaused) stateStr = "Paused";
-    
-    char buffer[256];
-    std::snprintf(buffer, sizeof(buffer), "Mode: %s | State: %s | Idle: %.1fs", modeStr, stateStr, g_mouseIdleTime);
-    XPSetWidgetDescriptor(g_statusLabel, buffer);
-}
-
-/**
- * Settings widget message handler
- */
-static int SettingsWidgetHandler(XPWidgetMessage inMessage, XPWidgetID inWidget, intptr_t inParam1, intptr_t inParam2) {
-    (void)inParam2;  // Unused
-    
-    if (inMessage == xpMessage_CloseButtonPushed) {
-        if (inWidget == g_settingsWidget) {
-            UpdateSettingsFromUI();
-            XPHideWidget(g_settingsWidget);
-            return 1;
-        }
-    }
-    
-    if (inMessage == xpMsg_PushButtonPressed) {
-        // Could handle Apply button here if we added one
-        (void)inParam1;  // Unused for now
-        return 0;
-    }
-    
-    if (inMessage == xpMsg_TextFieldChanged) {
-        // Could validate input here
-        return 0;
-    }
-    
-    return 0;
-}
-
-/**
- * Create the settings widget
- */
-static void CreateSettingsWidget() {
-    int screenWidth, screenHeight;
-    XPLMGetScreenSize(&screenWidth, &screenHeight);
-    
-    int width = 350;
-    int height = 280;
-    int left = (screenWidth - width) / 2;
-    int top = (screenHeight + height) / 2;
-    int right = left + width;
-    int bottom = top - height;
-    
-    // Create main window widget
-    g_settingsWidget = XPCreateWidget(left, top, right, bottom,
-        1,                           // Visible
-        "MovieCamera Settings",      // Title
-        1,                           // Root
-        nullptr,                     // No container
-        xpWidgetClass_MainWindow);
-    
-    // Set close button behavior
-    XPSetWidgetProperty(g_settingsWidget, xpProperty_MainWindowHasCloseBoxes, 1);
-    XPAddWidgetCallback(g_settingsWidget, SettingsWidgetHandler);
-    
-    int x = left + 20;
-    int y = top - 40;
-    int labelWidth = 120;
-    int fieldWidth = 80;
-    int rowHeight = 30;
-    
-    char buffer[64];
-    
-    // Delay setting
-    XPCreateWidget(x, y, x + labelWidth, y - 20,
-        1, "Delay (seconds):", 0, g_settingsWidget, xpWidgetClass_Caption);
-    
-    std::snprintf(buffer, sizeof(buffer), "%.0f", g_delaySeconds);
-    g_delayTextField = XPCreateWidget(x + labelWidth + 10, y, x + labelWidth + 10 + fieldWidth, y - 20,
-        1, buffer, 0, g_settingsWidget, xpWidgetClass_TextField);
-    XPSetWidgetProperty(g_delayTextField, xpProperty_TextFieldType, xpTextEntryField);
-    XPSetWidgetProperty(g_delayTextField, xpProperty_MaxCharacters, 6);
-    
-    y -= rowHeight;
-    
-    // Auto Alt setting
-    XPCreateWidget(x, y, x + labelWidth, y - 20,
-        1, "Auto Alt (ft):", 0, g_settingsWidget, xpWidgetClass_Caption);
-    
-    std::snprintf(buffer, sizeof(buffer), "%.0f", g_autoAltFt);
-    g_autoAltTextField = XPCreateWidget(x + labelWidth + 10, y, x + labelWidth + 10 + fieldWidth, y - 20,
-        1, buffer, 0, g_settingsWidget, xpWidgetClass_TextField);
-    XPSetWidgetProperty(g_autoAltTextField, xpProperty_TextFieldType, xpTextEntryField);
-    XPSetWidgetProperty(g_autoAltTextField, xpProperty_MaxCharacters, 6);
-    
-    y -= rowHeight + 10;
-    
-    // Shot duration section
-    XPCreateWidget(x, y, x + 200, y - 20,
-        1, "Shot Duration Range:", 0, g_settingsWidget, xpWidgetClass_Caption);
-    
-    y -= 25;
-    
-    // Min duration
-    XPCreateWidget(x, y, x + 60, y - 20,
-        1, "Min (s):", 0, g_settingsWidget, xpWidgetClass_Caption);
-    
-    std::snprintf(buffer, sizeof(buffer), "%.1f", g_shotMinDuration);
-    g_shotMinTextField = XPCreateWidget(x + 65, y, x + 65 + 60, y - 20,
-        1, buffer, 0, g_settingsWidget, xpWidgetClass_TextField);
-    XPSetWidgetProperty(g_shotMinTextField, xpProperty_TextFieldType, xpTextEntryField);
-    XPSetWidgetProperty(g_shotMinTextField, xpProperty_MaxCharacters, 5);
-    
-    // Max duration
-    XPCreateWidget(x + 140, y, x + 200, y - 20,
-        1, "Max (s):", 0, g_settingsWidget, xpWidgetClass_Caption);
-    
-    std::snprintf(buffer, sizeof(buffer), "%.1f", g_shotMaxDuration);
-    g_shotMaxTextField = XPCreateWidget(x + 205, y, x + 205 + 60, y - 20,
-        1, buffer, 0, g_settingsWidget, xpWidgetClass_TextField);
-    XPSetWidgetProperty(g_shotMaxTextField, xpProperty_TextFieldType, xpTextEntryField);
-    XPSetWidgetProperty(g_shotMaxTextField, xpProperty_MaxCharacters, 5);
-    
-    y -= rowHeight + 20;
-    
-    // Status section
-    XPCreateWidget(x, y, x + 80, y - 20,
-        1, "Status:", 0, g_settingsWidget, xpWidgetClass_Caption);
-    
-    y -= 25;
-    
-    g_statusLabel = XPCreateWidget(x, y, right - 20, y - 20,
-        1, "Mode: Off | State: Inactive | Idle: 0.0s", 0, g_settingsWidget, xpWidgetClass_Caption);
-    
-    y -= rowHeight + 10;
-    
-    // Help text
-    XPCreateWidget(x, y, right - 20, y - 40,
-        1, "Auto: Activates when on ground/stationary or\nat altitude after delay. Mouse pauses camera.", 
-        0, g_settingsWidget, xpWidgetClass_Caption);
-}
-
-/**
- * Destroy the settings widget
- */
-static void DestroySettingsWidget() {
-    if (g_settingsWidget) {
-        XPDestroyWidget(g_settingsWidget, 1);
-        g_settingsWidget = nullptr;
-        g_delayTextField = nullptr;
-        g_autoAltTextField = nullptr;
-        g_shotMinTextField = nullptr;
-        g_shotMaxTextField = nullptr;
-        g_statusLabel = nullptr;
-    }
 }
 
 /**
@@ -922,6 +817,10 @@ PLUGIN_API int XPluginEnable(void) {
     g_flightLoopId = XPLMCreateFlightLoop(&flightLoopParams);
     XPLMScheduleFlightLoop(g_flightLoopId, -1.0f, 1);
     
+    // Create settings window
+    g_settingsWindow = std::make_unique<SettingsWindow>();
+    g_settingsWindow->SetVisible(false);
+    
     // Get initial mouse position
     XPLMGetMouseLocation(&g_lastMouseX, &g_lastMouseY);
     
@@ -947,8 +846,8 @@ PLUGIN_API void XPluginDisable(void) {
         g_flightLoopId = nullptr;
     }
     
-    // Destroy settings widget
-    DestroySettingsWidget();
+    // Destroy settings window
+    g_settingsWindow.reset();
     
     XPLMDebugString("MovieCamera: Plugin disabled\n");
 }
@@ -957,6 +856,8 @@ PLUGIN_API void XPluginDisable(void) {
  * Message receive
  */
 PLUGIN_API void XPluginReceiveMessage(XPLMPluginID inFrom, int inMsg, void* inParam) {
+    (void)inFrom;
+    
     // Handle plane loaded message to reset state
     if (inMsg == XPLM_MSG_PLANE_LOADED && inParam == nullptr) {
         // User's plane loaded
