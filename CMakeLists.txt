@@ -66,6 +66,7 @@ elseif(APPLE)
     set_target_properties(MovieCamera PROPERTIES
         OUTPUT_NAME "MovieCamera"
         SUFFIX ".xpl"
+        PREFIX ""
         BUNDLE TRUE
     )
 else()
