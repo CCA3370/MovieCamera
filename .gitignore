@@ -39,3 +39,12 @@
 
 # debug information files
 *.dwo
+
+# Build directory
+build/
+
+# X-Plane plugin output
+*.xpl
+
+# Extracted SDK (keep the zip file, extract when building)
+SDK/

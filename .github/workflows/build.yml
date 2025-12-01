@@ -1,0 +1,122 @@
+name: Build MovieCamera Plugin
+
+on:
+  push:
+    branches: [ main, master, 'copilot/**' ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake build-essential libgl1-mesa-dev
+      
+      - name: Extract SDK
+        run: unzip XPSDK420.zip
+      
+      - name: Configure CMake
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+      
+      - name: Build
+        run: cmake --build build --config Release
+      
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-build
+          path: build/MovieCamera.xpl
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Extract SDK
+        run: |
+          Expand-Archive -Path XPSDK420.zip -DestinationPath .
+      
+      - name: Configure CMake
+        run: cmake -B build -A x64
+      
+      - name: Build
+        run: cmake --build build --config Release
+      
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-build
+          path: build/Release/MovieCamera.xpl
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Extract SDK
+        run: unzip XPSDK420.zip
+      
+      - name: Configure CMake
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="x86_64"
+      
+      - name: Build
+        run: cmake --build build --config Release
+      
+      - name: Upload macOS artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-build
+          path: build/MovieCamera.xpl
+
+  package:
+    needs: [build-linux, build-windows, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Download Linux build
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-build
+          path: artifacts/linux
+      
+      - name: Download Windows build
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-build
+          path: artifacts/windows
+      
+      - name: Download macOS build
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-build
+          path: artifacts/macos
+      
+      - name: Create package structure
+        run: |
+          mkdir -p package/MovieCamera/lin_x64
+          mkdir -p package/MovieCamera/win_x64
+          mkdir -p package/MovieCamera/mac_x64
+          
+          cp artifacts/linux/MovieCamera.xpl package/MovieCamera/lin_x64/
+          cp artifacts/windows/MovieCamera.xpl package/MovieCamera/win_x64/
+          cp artifacts/macos/MovieCamera.xpl package/MovieCamera/mac_x64/
+          
+          cp dist/README.txt package/MovieCamera/
+          cp dist/LICENSE.txt package/MovieCamera/
+      
+      - name: Create ZIP archive
+        run: |
+          cd package
+          zip -r ../MovieCamera.zip MovieCamera
+      
+      - name: Upload final package
+        uses: actions/upload-artifact@v4
+        with:
+          name: MovieCamera
+          path: MovieCamera.zip
