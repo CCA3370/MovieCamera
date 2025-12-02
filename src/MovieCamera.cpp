@@ -1271,12 +1271,12 @@ static int CameraControlCallback(XPLMCameraPosition_t* outCameraPosition, int in
             }
             
             const CameraKeyframe& kf1 = cpath.keyframes[kfIndex];
-            const CameraKeyframe& kf2 = cpath.keyframes[std::min(kfIndex + 1, cpath.keyframes.size() - 1)];
+            const CameraKeyframe& kf2 = cpath.keyframes[(std::min)(kfIndex + 1, cpath.keyframes.size() - 1)];
             
             // Calculate interpolation factor
             float segmentDuration = kf2.time - kf1.time;
             float t = (segmentDuration > 0.001f) ? (pathTime - kf1.time) / segmentDuration : 0.0f;
-            t = std::max(0.0f, std::min(1.0f, t));
+            t = (std::max)(0.0f, (std::min)(1.0f, t));
             
             // Interpolate keyframes with smooth easing
             CameraKeyframe interpolated = InterpolateKeyframes(kf1, kf2, t);
@@ -1512,7 +1512,7 @@ static int DrawTrajectoryCallback(XPLMDrawingPhase inPhase, int inIsBefore, void
         }
         
         const CameraKeyframe& kf1 = g_editingPath.keyframes[kfIndex];
-        const CameraKeyframe& kf2 = g_editingPath.keyframes[std::min(kfIndex + 1, g_editingPath.keyframes.size() - 1)];
+        const CameraKeyframe& kf2 = g_editingPath.keyframes[(std::min)(kfIndex + 1, g_editingPath.keyframes.size() - 1)];
         
         float segDuration = kf2.time - kf1.time;
         float segT = (segDuration > 0.001f) ? (pathTime - kf1.time) / segDuration : 0.0f;
