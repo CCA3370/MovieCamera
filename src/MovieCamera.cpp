@@ -20,6 +20,12 @@
 #include "ImgWindow.h"
 #include "imgui.h"
 
+// OpenGL for trajectory drawing
+#if IBM
+#include <windows.h>
+#endif
+#include <GL/gl.h>
+
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
@@ -162,6 +168,10 @@ static bool g_pathEditorOpen = false;
 static CustomCameraPath g_editingPath;
 static int g_editingKeyframeIndex = -1;
 static char g_pathNameBuffer[64] = "";
+static bool g_showTrajectoryPreview = false;  // Toggle for 3D trajectory visualization
+
+// Draw callback for 3D trajectory visualization
+static int DrawTrajectoryCallback(XPLMDrawingPhase inPhase, int inIsBefore, void* inRefcon);
 
 /**
  * Settings Window using ImgWindow
@@ -342,12 +352,10 @@ void SettingsWindow::buildInterface() {
         g_editingPath.isLooping = false;
         snprintf(g_pathNameBuffer, sizeof(g_pathNameBuffer), "New Path");
         g_editingKeyframeIndex = -1;
+        g_showTrajectoryPreview = true;  // Enable trajectory preview by default
         
-        // Add two default keyframes
-        CameraKeyframe kf1 = {0.0f, 0.0f, 10.0f, -30.0f, 10.0f, 180.0f, 0.0f, 1.0f, 50.0f, 2.8f};
-        CameraKeyframe kf2 = {5.0f, 0.0f, 15.0f, -40.0f, 15.0f, 170.0f, 0.0f, 1.1f, 55.0f, 2.8f};
-        g_editingPath.keyframes.push_back(kf1);
-        g_editingPath.keyframes.push_back(kf2);
+        // Start with empty keyframes - user will capture positions
+        g_editingPath.keyframes.clear();
     }
     
     ImGui::SameLine();
@@ -361,6 +369,16 @@ void SettingsWindow::buildInterface() {
         ImGui::Spacing();
         ImGui::Separator();
         ImGui::Text("Path Editor");
+        
+        // Trajectory preview toggle with help text
+        ImGui::Checkbox("Show 3D Trajectory", &g_showTrajectoryPreview);
+        ImGui::SameLine();
+        ImGui::TextDisabled("(?)");
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("When enabled, draws the camera path in 3D space.\nGreen line = path trajectory\nYellow dots = keyframes\nRed dot = selected keyframe");
+        }
+        
+        ImGui::Spacing();
         
         // Path name
         ImGui::Text("Name:");
@@ -380,6 +398,111 @@ void SettingsWindow::buildInterface() {
         ImGui::Checkbox("Looping", &g_editingPath.isLooping);
         
         ImGui::Spacing();
+        ImGui::Separator();
+        
+        // Capture current camera position section
+        ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Capture Camera Position");
+        ImGui::SameLine();
+        ImGui::TextDisabled("(?)");
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Move X-Plane's camera to your desired position,\nthen click 'Capture Position' to add it as a keyframe.\nBuild your camera path by capturing multiple positions.");
+        }
+        
+        if (ImGui::Button("Capture Position", ImVec2(120, 0))) {
+            // Read current camera position
+            XPLMCameraPosition_t camPos;
+            XPLMReadCameraPosition(&camPos);
+            
+            // Get aircraft position to calculate relative offset
+            float acfX = XPLMGetDataf(g_drLocalX);
+            float acfY = XPLMGetDataf(g_drLocalY);
+            float acfZ = XPLMGetDataf(g_drLocalZ);
+            float acfHeading = XPLMGetDataf(g_drHeading);
+            
+            // Transform world camera position to aircraft-relative coordinates
+            float rad = acfHeading * PI / 180.0f;
+            float cosH = std::cos(rad);
+            float sinH = std::sin(rad);
+            
+            // Calculate offset from aircraft
+            float dx = camPos.x - acfX;
+            float dy = camPos.y - acfY;
+            float dz = camPos.z - acfZ;
+            
+            // Rotate to aircraft-relative coordinates
+            float relX = dx * cosH + dz * sinH;
+            float relY = dy;
+            float relZ = -dx * sinH + dz * cosH;
+            
+            // Calculate relative heading
+            float relHeading = camPos.heading - acfHeading;
+            while (relHeading > 180.0f) relHeading -= 360.0f;
+            while (relHeading < -180.0f) relHeading += 360.0f;
+            
+            // Create new keyframe
+            CameraKeyframe newKf;
+            newKf.time = g_editingPath.keyframes.empty() ? 0.0f : g_editingPath.keyframes.back().time + 3.0f;
+            newKf.x = relX;
+            newKf.y = relY;
+            newKf.z = relZ;
+            newKf.pitch = camPos.pitch;
+            newKf.heading = relHeading;
+            newKf.roll = camPos.roll;
+            newKf.zoom = camPos.zoom;
+            newKf.focalLength = 50.0f;
+            newKf.aperture = 2.8f;
+            
+            g_editingPath.keyframes.push_back(newKf);
+            g_editingKeyframeIndex = static_cast<int>(g_editingPath.keyframes.size()) - 1;
+        }
+        
+        ImGui::SameLine();
+        if (ImGui::Button("Update Selected", ImVec2(110, 0))) {
+            if (g_editingKeyframeIndex >= 0 && g_editingKeyframeIndex < static_cast<int>(g_editingPath.keyframes.size())) {
+                // Read current camera position
+                XPLMCameraPosition_t camPos;
+                XPLMReadCameraPosition(&camPos);
+                
+                // Get aircraft position
+                float acfX = XPLMGetDataf(g_drLocalX);
+                float acfY = XPLMGetDataf(g_drLocalY);
+                float acfZ = XPLMGetDataf(g_drLocalZ);
+                float acfHeading = XPLMGetDataf(g_drHeading);
+                
+                // Transform to aircraft-relative
+                float rad = acfHeading * PI / 180.0f;
+                float cosH = std::cos(rad);
+                float sinH = std::sin(rad);
+                
+                float dx = camPos.x - acfX;
+                float dy = camPos.y - acfY;
+                float dz = camPos.z - acfZ;
+                
+                float relX = dx * cosH + dz * sinH;
+                float relY = dy;
+                float relZ = -dx * sinH + dz * cosH;
+                
+                float relHeading = camPos.heading - acfHeading;
+                while (relHeading > 180.0f) relHeading -= 360.0f;
+                while (relHeading < -180.0f) relHeading += 360.0f;
+                
+                // Update selected keyframe
+                CameraKeyframe& kf = g_editingPath.keyframes[g_editingKeyframeIndex];
+                kf.x = relX;
+                kf.y = relY;
+                kf.z = relZ;
+                kf.pitch = camPos.pitch;
+                kf.heading = relHeading;
+                kf.roll = camPos.roll;
+                kf.zoom = camPos.zoom;
+            }
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Update the selected keyframe with current camera position");
+        }
+        
+        ImGui::Spacing();
+        ImGui::Separator();
         ImGui::Text("Keyframes (%zu):", g_editingPath.keyframes.size());
         
         // Keyframe list
@@ -1330,6 +1453,115 @@ static float FlightLoopCallback(float inElapsedSinceLastCall, float inElapsedTim
 }
 
 /**
+ * Draw callback to visualize camera trajectory in 3D space
+ */
+static int DrawTrajectoryCallback(XPLMDrawingPhase inPhase, int inIsBefore, void* inRefcon) {
+    (void)inPhase;
+    (void)inIsBefore;
+    (void)inRefcon;
+    
+    // Only draw if trajectory preview is enabled and we have a path being edited
+    if (!g_showTrajectoryPreview || !g_pathEditorOpen || g_editingPath.keyframes.size() < 2) {
+        return 1;
+    }
+    
+    // Get aircraft position
+    float acfX = XPLMGetDataf(g_drLocalX);
+    float acfY = XPLMGetDataf(g_drLocalY);
+    float acfZ = XPLMGetDataf(g_drLocalZ);
+    float acfHeading = XPLMGetDataf(g_drHeading);
+    
+    float rad = acfHeading * PI / 180.0f;
+    float cosH = std::cos(rad);
+    float sinH = std::sin(rad);
+    
+    // Set up OpenGL state for drawing lines
+    XPLMSetGraphicsState(0, 0, 0, 0, 1, 1, 0);
+    
+    // Draw trajectory line (green color)
+    glColor4f(0.0f, 1.0f, 0.3f, 0.8f);
+    glLineWidth(3.0f);
+    glBegin(GL_LINE_STRIP);
+    
+    // Sample trajectory at regular intervals
+    float totalDuration = g_editingPath.getTotalDuration();
+    int numSamples = static_cast<int>(totalDuration * 10.0f);  // 10 samples per second
+    if (numSamples < 20) numSamples = 20;
+    if (numSamples > 200) numSamples = 200;
+    
+    for (int i = 0; i <= numSamples; ++i) {
+        float t = static_cast<float>(i) / static_cast<float>(numSamples);
+        float pathTime = t * totalDuration;
+        
+        // Find keyframes to interpolate
+        size_t kfIndex = 0;
+        for (size_t j = 0; j < g_editingPath.keyframes.size() - 1; ++j) {
+            if (pathTime >= g_editingPath.keyframes[j].time && 
+                pathTime < g_editingPath.keyframes[j + 1].time) {
+                kfIndex = j;
+                break;
+            }
+            if (j == g_editingPath.keyframes.size() - 2) {
+                kfIndex = j;
+            }
+        }
+        
+        const CameraKeyframe& kf1 = g_editingPath.keyframes[kfIndex];
+        const CameraKeyframe& kf2 = g_editingPath.keyframes[std::min(kfIndex + 1, g_editingPath.keyframes.size() - 1)];
+        
+        float segDuration = kf2.time - kf1.time;
+        float segT = (segDuration > 0.001f) ? (pathTime - kf1.time) / segDuration : 0.0f;
+        segT = std::clamp(segT, 0.0f, 1.0f);
+        
+        // Interpolate position with easing
+        float smoothT = EaseInOutSine(segT);
+        float posX = Lerp(kf1.x, kf2.x, smoothT);
+        float posY = Lerp(kf1.y, kf2.y, smoothT);
+        float posZ = Lerp(kf1.z, kf2.z, smoothT);
+        
+        // Transform to world coordinates
+        float worldX = acfX + posX * cosH - posZ * sinH;
+        float worldY = acfY + posY;
+        float worldZ = acfZ + posX * sinH + posZ * cosH;
+        
+        glVertex3f(worldX, worldY, worldZ);
+    }
+    glEnd();
+    
+    // Draw keyframe points (yellow spheres approximated with points)
+    glColor4f(1.0f, 1.0f, 0.0f, 1.0f);
+    glPointSize(10.0f);
+    glBegin(GL_POINTS);
+    for (size_t i = 0; i < g_editingPath.keyframes.size(); ++i) {
+        const CameraKeyframe& kf = g_editingPath.keyframes[i];
+        float worldX = acfX + kf.x * cosH - kf.z * sinH;
+        float worldY = acfY + kf.y;
+        float worldZ = acfZ + kf.x * sinH + kf.z * cosH;
+        glVertex3f(worldX, worldY, worldZ);
+    }
+    glEnd();
+    
+    // Highlight selected keyframe (red)
+    if (g_editingKeyframeIndex >= 0 && g_editingKeyframeIndex < static_cast<int>(g_editingPath.keyframes.size())) {
+        const CameraKeyframe& kf = g_editingPath.keyframes[g_editingKeyframeIndex];
+        float worldX = acfX + kf.x * cosH - kf.z * sinH;
+        float worldY = acfY + kf.y;
+        float worldZ = acfZ + kf.x * sinH + kf.z * cosH;
+        
+        glColor4f(1.0f, 0.2f, 0.2f, 1.0f);
+        glPointSize(15.0f);
+        glBegin(GL_POINTS);
+        glVertex3f(worldX, worldY, worldZ);
+        glEnd();
+    }
+    
+    glLineWidth(1.0f);
+    glPointSize(1.0f);
+    
+    return 1;
+}
+
+/**
  * Plugin start
  */
 PLUGIN_API int XPluginStart(char* outName, char* outSig, char* outDesc) {
@@ -1411,6 +1643,9 @@ PLUGIN_API int XPluginEnable(void) {
     g_flightLoopId = XPLMCreateFlightLoop(&flightLoopParams);
     XPLMScheduleFlightLoop(g_flightLoopId, -1.0f, 1);
     
+    // Register draw callback for trajectory visualization
+    XPLMRegisterDrawCallback(DrawTrajectoryCallback, xplm_Phase_Modern3D, 0, nullptr);
+    
     // Create settings window
     g_settingsWindow = std::make_unique<SettingsWindow>();
     g_settingsWindow->SetVisible(false);
@@ -1433,6 +1668,9 @@ PLUGIN_API void XPluginDisable(void) {
     if (g_functionActive) {
         StopCameraControl();
     }
+    
+    // Unregister draw callback
+    XPLMUnregisterDrawCallback(DrawTrajectoryCallback, xplm_Phase_Modern3D, 0, nullptr);
     
     // Destroy flight loop
     if (g_flightLoopId) {

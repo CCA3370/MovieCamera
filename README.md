@@ -59,19 +59,29 @@ Create your own camera movement paths with keyframe-based animation:
 - Support for looping paths
 - Save and load custom paths (stored in `camera_paths.cfg`)
 - Preview paths in real-time while editing
+- **3D Trajectory Visualization** - See your camera path drawn in 3D space
 
 **Path Editor:**
 1. Open Settings window from `Plugins > MovieCamera > Settings`
 2. Click "New Path" to create a new custom path
-3. Add keyframes and adjust parameters:
+3. **Capture Camera Positions**:
+   - Position X-Plane's camera where you want a keyframe
+   - Click "Capture Position" to add the current camera location as a keyframe
+   - Repeat to build your complete camera path
+   - Use "Update Selected" to modify an existing keyframe with the current camera position
+4. Enable "Show 3D Trajectory" to visualize:
+   - **Green line**: The camera path trajectory
+   - **Yellow dots**: Keyframe positions
+   - **Red dot**: Currently selected keyframe
+5. Fine-tune keyframe parameters:
    - **Time**: When this keyframe occurs (seconds)
    - **Position (X, Y, Z)**: Camera offset from aircraft
    - **Rotation (Pitch, Heading, Roll)**: Camera orientation
    - **Zoom**: Camera zoom level
    - **Focal Length**: Lens focal length (mm)
    - **Aperture**: f-stop value for DOF simulation
-4. Click "Preview" to see the path in action
-5. Click "Save Path" to save for future use
+6. Click "Preview" to see the path in action
+7. Click "Save Path" to save for future use
 
 ### Intelligent Shot Switching
 - Each shot lasts 6-15 seconds (configurable)
