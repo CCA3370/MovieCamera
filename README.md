@@ -21,7 +21,7 @@ Access the plugin from `Plugins > MovieCamera`:
 
 ### Cinematic Camera System
 
-The plugin provides smooth transitions between various camera angles with **continuous multi-axis drift motion** for a cinematic feel:
+The plugin provides smooth transitions between various camera angles with **continuous multi-axis drift motion** using sinusoidal easing for a cinematic feel:
 
 **Cockpit Views (11 angles):**
 - Center Panel (slow zoom with subtle drift)
@@ -32,21 +32,46 @@ The plugin provides smooth transitions between various camera angles with **cont
 - Left/Right Window (slow pan)
 - Pedestal View
 
-**External Views (15 angles):**
-- Front Hero Shot (slow rise and approach)
-- Rear Chase (following behind)
+**External Views (16 angles):**
+- Front Hero Shot (positioned offset to avoid clipping)
+- Rear Chase (elevated and offset for better framing)
 - Left/Right Flyby (dramatic side sweep)
-- High Orbit (circling view)
-- Low Angle Front (dramatic upward)
-- Quarter views (front/rear, left/right)
-- Wing/Engine close-ups
+- High Orbit (circling view from above)
+- Low Angle Front (dramatic upward shot)
+- Quarter views (front/rear, left/right - all offset from center)
+- Wing/Engine close-ups (positioned outside aircraft)
 - Tail View
+- Belly View (looking up from below)
 
-### Cinematic Movement Features
-- **Slow Multi-Axis Drift**: After transitioning to a shot, the camera continuously drifts in position (X, Y, Z), rotation (pitch, heading, roll) for a smooth, professional look
+### Smooth Camera Movement
+- **Sinusoidal Drift Motion**: Camera drift uses smooth sine-wave based easing instead of linear motion, creating a floating, organic feel
+- **Multi-frequency oscillation**: Different camera axes use slightly different frequencies for natural-looking movement
 - **Cockpit Zoom Breathing**: In cockpit views, the focal length slowly changes to simulate aperture/depth-of-field effects
-- **Longer Shot Duration**: Default 6-15 seconds per shot for more cinematic pacing
 - **Smooth Transitions**: Ease-in-out cubic transitions between shots
+
+### Custom Camera Paths
+
+Create your own camera movement paths with keyframe-based animation:
+
+**Features:**
+- Define multiple keyframes with position, rotation, zoom, focal length, and aperture
+- Smooth interpolation between keyframes using ease-in-out curves
+- Support for looping paths
+- Save and load custom paths (stored in `camera_paths.cfg`)
+- Preview paths in real-time while editing
+
+**Path Editor:**
+1. Open Settings window from `Plugins > MovieCamera > Settings`
+2. Click "New Path" to create a new custom path
+3. Add keyframes and adjust parameters:
+   - **Time**: When this keyframe occurs (seconds)
+   - **Position (X, Y, Z)**: Camera offset from aircraft
+   - **Rotation (Pitch, Heading, Roll)**: Camera orientation
+   - **Zoom**: Camera zoom level
+   - **Focal Length**: Lens focal length (mm)
+   - **Aperture**: f-stop value for DOF simulation
+4. Click "Preview" to see the path in action
+5. Click "Save Path" to save for future use
 
 ### Intelligent Shot Switching
 - Each shot lasts 6-15 seconds (configurable)
@@ -65,6 +90,7 @@ Configure via `Plugins > MovieCamera > Settings`:
 - **Delay (seconds)**: Time to wait after mouse stops moving before activating/resuming camera (default: 60)
 - **Auto Alt (ft)**: Altitude threshold above which Auto mode can activate (default: 18000)
 - **Shot Duration Min/Max (s)**: Range for random shot duration (default: 6-15 seconds)
+- **Custom Camera Paths**: Create, edit, and manage custom camera movement paths
 
 ## Building
 
@@ -72,6 +98,7 @@ Configure via `Plugins > MovieCamera > Settings`:
 - CMake 3.16 or later
 - C++17 compatible compiler
 - X-Plane SDK 4.2.0 (included in XPSDK420.zip)
+- OpenGL development headers (libgl1-mesa-dev on Linux)
 
 ### Linux
 ```bash
