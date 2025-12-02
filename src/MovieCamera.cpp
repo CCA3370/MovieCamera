@@ -22,9 +22,14 @@
 
 // OpenGL for trajectory drawing
 #if IBM
+#define NOMINMAX  // Prevent Windows min/max macros from conflicting with std::min/std::max
 #include <windows.h>
-#endif
 #include <GL/gl.h>
+#elif APL
+#include <OpenGL/gl.h>
+#else
+#include <GL/gl.h>
+#endif
 
 #include <cstdlib>
 #include <cstring>
