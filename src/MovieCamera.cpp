@@ -35,6 +35,10 @@
 #define PLUGIN_SIG         "com.moviecamera.xplane"
 #define PLUGIN_DESCRIPTION "Cinematic camera plugin with automatic smooth camera movements"
 
+// Mathematical constants
+constexpr float PI = 3.14159265359f;
+constexpr float TWO_PI = 2.0f * PI;
+
 // Plugin State
 enum class PluginMode {
     Off,      // Plugin functionality is off
@@ -197,10 +201,10 @@ static std::string GetPluginPath();
  * SettingsWindow constructor
  */
 SettingsWindow::SettingsWindow() :
-    ImgWindow(100, 700, 550, 100, xplm_WindowDecorationRoundRectangle, xplm_WindowLayerFloatingWindows)
+    ImgWindow(100, 800, 600, 100, xplm_WindowDecorationRoundRectangle, xplm_WindowLayerFloatingWindows)
 {
     SetWindowTitle("MovieCamera Settings");
-    SetWindowResizingLimits(450, 500, 700, 800);
+    SetWindowResizingLimits(450, 550, 700, 900);
 }
 
 /**
@@ -311,8 +315,7 @@ void SettingsWindow::buildInterface() {
             if (ImGui::SmallButton("Edit")) {
                 g_pathEditorOpen = true;
                 g_editingPath = g_customPaths[i];
-                strncpy(g_pathNameBuffer, g_customPaths[i].name.c_str(), sizeof(g_pathNameBuffer) - 1);
-                g_pathNameBuffer[sizeof(g_pathNameBuffer) - 1] = '\0';
+                snprintf(g_pathNameBuffer, sizeof(g_pathNameBuffer), "%s", g_customPaths[i].name.c_str());
                 g_editingKeyframeIndex = -1;
             }
             
@@ -337,8 +340,7 @@ void SettingsWindow::buildInterface() {
         g_editingPath.name = "New Path";
         g_editingPath.type = CameraType::External;
         g_editingPath.isLooping = false;
-        strncpy(g_pathNameBuffer, "New Path", sizeof(g_pathNameBuffer) - 1);
-        g_pathNameBuffer[sizeof(g_pathNameBuffer) - 1] = '\0';
+        snprintf(g_pathNameBuffer, sizeof(g_pathNameBuffer), "New Path");
         g_editingKeyframeIndex = -1;
         
         // Add two default keyframes
@@ -758,13 +760,13 @@ static float LerpAngle(float a, float b, float t) {
  */
 static float SmoothDrift(float baseValue, float driftAmount, float time, float frequency) {
     // Use combination of sine waves at different frequencies for organic feel
-    float primary = std::sin(time * frequency * 2.0f * 3.14159f) * 0.5f + 0.5f;  // Main wave
-    float secondary = std::sin(time * frequency * 0.7f * 2.0f * 3.14159f) * 0.3f;  // Slower secondary wave
-    float tertiary = std::sin(time * frequency * 1.3f * 2.0f * 3.14159f) * 0.2f;   // Faster tertiary wave
+    float primary = std::sin(time * frequency * TWO_PI) * 0.5f + 0.5f;  // Main wave
+    float secondary = std::sin(time * frequency * 0.7f * TWO_PI) * 0.3f;  // Slower secondary wave
+    float tertiary = std::sin(time * frequency * 1.3f * TWO_PI) * 0.2f;   // Faster tertiary wave
     
     // Combine waves for natural-looking motion
     float smoothT = primary + secondary + tertiary;
-    smoothT = std::max(0.0f, std::min(1.0f, smoothT));  // Clamp to 0-1
+    smoothT = std::clamp(smoothT, 0.0f, 1.0f);  // Clamp to 0-1
     
     return baseValue + driftAmount * smoothT;
 }
@@ -773,11 +775,10 @@ static float SmoothDrift(float baseValue, float driftAmount, float time, float f
  * Ease in-out sine for extra smooth interpolation
  */
 static float EaseInOutSine(float t) {
-    return -(std::cos(3.14159f * t) - 1.0f) / 2.0f;
+    return -(std::cos(PI * t) - 1.0f) / 2.0f;
 }
 
-// CatmullRom spline function reserved for future advanced path interpolation
-// static float CatmullRom(float p0, float p1, float p2, float p3, float t) {...}
+// Note: CatmullRom spline function may be added in future for advanced path interpolation
 
 /**
  * Interpolate between two keyframes with smooth easing
@@ -878,19 +879,28 @@ static void LoadCustomPaths() {
                 if (strncmp(line, "path_end", 8) == 0) break;
                 
                 if (strncmp(line, "name ", 5) == 0) {
-                    char name[64];
-                    sscanf(line + 5, "%63[^\n]", name);
-                    cpath.name = name;
+                    // Safe string parsing with bounds checking
+                    char name[64] = {0};
+                    int result = sscanf(line + 5, "%63[^\n]", name);
+                    if (result == 1) {
+                        cpath.name = name;
+                    }
                 } else if (strncmp(line, "type ", 5) == 0) {
-                    cpath.type = static_cast<CameraType>(atoi(line + 5));
+                    int typeVal = atoi(line + 5);
+                    if (typeVal == 0 || typeVal == 1) {
+                        cpath.type = static_cast<CameraType>(typeVal);
+                    }
                 } else if (strncmp(line, "looping ", 8) == 0) {
                     cpath.isLooping = (atoi(line + 8) != 0);
                 } else if (strncmp(line, "kf ", 3) == 0) {
-                    CameraKeyframe kf;
-                    sscanf(line + 3, "%f %f %f %f %f %f %f %f %f %f",
+                    CameraKeyframe kf = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 50.0f, 2.8f};
+                    int parsed = sscanf(line + 3, "%f %f %f %f %f %f %f %f %f %f",
                            &kf.time, &kf.x, &kf.y, &kf.z, &kf.pitch, &kf.heading,
                            &kf.roll, &kf.zoom, &kf.focalLength, &kf.aperture);
-                    cpath.keyframes.push_back(kf);
+                    // Only add keyframe if all 10 values were successfully parsed
+                    if (parsed == 10) {
+                        cpath.keyframes.push_back(kf);
+                    }
                 }
             }
             
@@ -1024,7 +1034,7 @@ static void StartCameraControl() {
     float acfZ = XPLMGetDataf(g_drLocalZ);
     float acfHeading = XPLMGetDataf(g_drHeading);
     
-    float rad = acfHeading * 3.14159f / 180.0f;
+    float rad = acfHeading * PI / 180.0f;
     float cosH = std::cos(rad);
     float sinH = std::sin(rad);
     
@@ -1144,7 +1154,7 @@ static int CameraControlCallback(XPLMCameraPosition_t* outCameraPosition, int in
             CameraKeyframe interpolated = InterpolateKeyframes(kf1, kf2, t);
             
             // Transform to world coordinates
-            float rad = acfHeading * 3.14159f / 180.0f;
+            float rad = acfHeading * PI / 180.0f;
             float cosH = std::cos(rad);
             float sinH = std::sin(rad);
             
@@ -1173,7 +1183,7 @@ static int CameraControlCallback(XPLMCameraPosition_t* outCameraPosition, int in
         outCameraPosition->zoom = Lerp(g_startPos.zoom, g_targetPos.zoom, t);
     } else {
         // Apply shot with SMOOTH cinematic drift using sinusoidal easing
-        float rad = acfHeading * 3.14159f / 180.0f;
+        float rad = acfHeading * PI / 180.0f;
         float cosH = std::cos(rad);
         float sinH = std::sin(rad);
         
@@ -1297,7 +1307,7 @@ static float FlightLoopCallback(float inElapsedSinceLastCall, float inElapsedTim
                 float acfZ = XPLMGetDataf(g_drLocalZ);
                 float acfHeading = XPLMGetDataf(g_drHeading);
                 
-                float rad = acfHeading * 3.14159f / 180.0f;
+                float rad = acfHeading * PI / 180.0f;
                 float cosH = std::cos(rad);
                 float sinH = std::sin(rad);
                 
