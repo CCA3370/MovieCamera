@@ -20,6 +20,12 @@
 #include "ImgWindow.h"
 #include "imgui.h"
 
+// OpenGL for trajectory drawing
+#if IBM
+#include <windows.h>
+#endif
+#include <GL/gl.h>
+
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
@@ -34,6 +40,10 @@
 #define PLUGIN_NAME        "MovieCamera"
 #define PLUGIN_SIG         "com.moviecamera.xplane"
 #define PLUGIN_DESCRIPTION "Cinematic camera plugin with automatic smooth camera movements"
+
+// Mathematical constants
+constexpr float PI = 3.14159265359f;
+constexpr float TWO_PI = 2.0f * PI;
 
 // Plugin State
 enum class PluginMode {
@@ -59,6 +69,29 @@ struct CameraShot {
     float driftX, driftY, driftZ;          // Position drift per second
     float driftPitch, driftHeading, driftRoll;  // Rotation drift per second
     float driftZoom;                        // Zoom drift per second (for cockpit)
+};
+
+// Keyframe for custom camera paths
+struct CameraKeyframe {
+    float time;              // Time in seconds from path start
+    float x, y, z;           // Position offset from aircraft
+    float pitch, heading, roll;
+    float zoom;
+    float focalLength;       // Focal length parameter (mm equivalent)
+    float aperture;          // Aperture (f-stop) for DOF simulation
+};
+
+// Custom camera path with keyframes
+struct CustomCameraPath {
+    std::string name;
+    CameraType type;
+    std::vector<CameraKeyframe> keyframes;
+    bool isLooping;
+    
+    float getTotalDuration() const {
+        if (keyframes.empty()) return 0.0f;
+        return keyframes.back().time;
+    }
 };
 
 // Plugin Global State
@@ -124,6 +157,22 @@ static XPLMFlightLoopID g_flightLoopId = nullptr;
 static std::vector<CameraShot> g_cockpitShots;
 static std::vector<CameraShot> g_externalShots;
 
+// Custom camera paths
+static std::vector<CustomCameraPath> g_customPaths;
+static int g_currentCustomPathIndex = -1;
+static bool g_usingCustomPath = false;
+static float g_customPathTime = 0.0f;
+
+// Path editor state
+static bool g_pathEditorOpen = false;
+static CustomCameraPath g_editingPath;
+static int g_editingKeyframeIndex = -1;
+static char g_pathNameBuffer[64] = "";
+static bool g_showTrajectoryPreview = false;  // Toggle for 3D trajectory visualization
+
+// Draw callback for 3D trajectory visualization
+static int DrawTrajectoryCallback(XPLMDrawingPhase inPhase, int inIsBefore, void* inRefcon);
+
 /**
  * Settings Window using ImgWindow
  */
@@ -152,15 +201,20 @@ static bool CheckAutoConditions();
 static CameraShot SelectNextShot();
 static float Lerp(float a, float b, float t);
 static float EaseInOutCubic(float t);
+static float SmoothDrift(float baseValue, float driftAmount, float time, float frequency);
+static CameraKeyframe InterpolateKeyframes(const CameraKeyframe& a, const CameraKeyframe& b, float t);
+static void SaveCustomPaths();
+static void LoadCustomPaths();
+static std::string GetPluginPath();
 
 /**
  * SettingsWindow constructor
  */
 SettingsWindow::SettingsWindow() :
-    ImgWindow(100, 500, 450, 200, xplm_WindowDecorationRoundRectangle, xplm_WindowLayerFloatingWindows)
+    ImgWindow(100, 800, 600, 100, xplm_WindowDecorationRoundRectangle, xplm_WindowLayerFloatingWindows)
 {
     SetWindowTitle("MovieCamera Settings");
-    SetWindowResizingLimits(350, 300, 500, 400);
+    SetWindowResizingLimits(450, 550, 700, 900);
 }
 
 /**
@@ -242,6 +296,351 @@ void SettingsWindow::buildInterface() {
     ImGui::Separator();
     ImGui::Spacing();
     
+    // Custom Camera Paths Section
+    ImGui::Text("Custom Camera Paths");
+    ImGui::SameLine();
+    ImGui::TextDisabled("(?)");
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Create custom camera movement paths with keyframes.\nDefine position, rotation, zoom, focal length and aperture at each keyframe.");
+    }
+    
+    // List existing paths
+    if (!g_customPaths.empty()) {
+        ImGui::Text("Saved Paths:");
+        for (size_t i = 0; i < g_customPaths.size(); ++i) {
+            ImGui::PushID(static_cast<int>(i));
+            
+            bool isSelected = (g_currentCustomPathIndex == static_cast<int>(i) && g_usingCustomPath);
+            if (ImGui::Selectable(g_customPaths[i].name.c_str(), isSelected, 0, ImVec2(120, 0))) {
+                // Select this path for playback
+                g_currentCustomPathIndex = static_cast<int>(i);
+                g_usingCustomPath = true;
+                g_customPathTime = 0.0f;
+                if (!g_functionActive) {
+                    StartCameraControl();
+                }
+            }
+            
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Edit")) {
+                g_pathEditorOpen = true;
+                g_editingPath = g_customPaths[i];
+                snprintf(g_pathNameBuffer, sizeof(g_pathNameBuffer), "%s", g_customPaths[i].name.c_str());
+                g_editingKeyframeIndex = -1;
+            }
+            
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Del")) {
+                g_customPaths.erase(g_customPaths.begin() + static_cast<std::ptrdiff_t>(i));
+                SaveCustomPaths();
+                if (g_currentCustomPathIndex == static_cast<int>(i)) {
+                    g_usingCustomPath = false;
+                    g_currentCustomPathIndex = -1;
+                }
+            }
+            
+            ImGui::PopID();
+        }
+    }
+    
+    // Button to create new path
+    if (ImGui::Button("New Path", ImVec2(80, 0))) {
+        g_pathEditorOpen = true;
+        g_editingPath = CustomCameraPath();
+        g_editingPath.name = "New Path";
+        g_editingPath.type = CameraType::External;
+        g_editingPath.isLooping = false;
+        snprintf(g_pathNameBuffer, sizeof(g_pathNameBuffer), "New Path");
+        g_editingKeyframeIndex = -1;
+        g_showTrajectoryPreview = true;  // Enable trajectory preview by default
+        
+        // Start with empty keyframes - user will capture positions
+        g_editingPath.keyframes.clear();
+    }
+    
+    ImGui::SameLine();
+    if (g_usingCustomPath && ImGui::Button("Stop Path", ImVec2(80, 0))) {
+        g_usingCustomPath = false;
+        g_currentCustomPathIndex = -1;
+    }
+    
+    // Path Editor Window
+    if (g_pathEditorOpen) {
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Text("Path Editor");
+        
+        // Trajectory preview toggle with help text
+        ImGui::Checkbox("Show 3D Trajectory", &g_showTrajectoryPreview);
+        ImGui::SameLine();
+        ImGui::TextDisabled("(?)");
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("When enabled, draws the camera path in 3D space.\nGreen line = path trajectory\nYellow dots = keyframes\nRed dot = selected keyframe");
+        }
+        
+        ImGui::Spacing();
+        
+        // Path name
+        ImGui::Text("Name:");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(150);
+        ImGui::InputText("##pathname", g_pathNameBuffer, sizeof(g_pathNameBuffer));
+        
+        // Path type
+        ImGui::Text("Type:");
+        ImGui::SameLine();
+        int typeInt = static_cast<int>(g_editingPath.type);
+        if (ImGui::RadioButton("Cockpit", &typeInt, 0)) g_editingPath.type = CameraType::Cockpit;
+        ImGui::SameLine();
+        if (ImGui::RadioButton("External", &typeInt, 1)) g_editingPath.type = CameraType::External;
+        
+        // Looping
+        ImGui::Checkbox("Looping", &g_editingPath.isLooping);
+        
+        ImGui::Spacing();
+        ImGui::Separator();
+        
+        // Capture current camera position section
+        ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Capture Camera Position");
+        ImGui::SameLine();
+        ImGui::TextDisabled("(?)");
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Move X-Plane's camera to your desired position,\nthen click 'Capture Position' to add it as a keyframe.\nBuild your camera path by capturing multiple positions.");
+        }
+        
+        if (ImGui::Button("Capture Position", ImVec2(120, 0))) {
+            // Read current camera position
+            XPLMCameraPosition_t camPos;
+            XPLMReadCameraPosition(&camPos);
+            
+            // Get aircraft position to calculate relative offset
+            float acfX = XPLMGetDataf(g_drLocalX);
+            float acfY = XPLMGetDataf(g_drLocalY);
+            float acfZ = XPLMGetDataf(g_drLocalZ);
+            float acfHeading = XPLMGetDataf(g_drHeading);
+            
+            // Transform world camera position to aircraft-relative coordinates
+            float rad = acfHeading * PI / 180.0f;
+            float cosH = std::cos(rad);
+            float sinH = std::sin(rad);
+            
+            // Calculate offset from aircraft
+            float dx = camPos.x - acfX;
+            float dy = camPos.y - acfY;
+            float dz = camPos.z - acfZ;
+            
+            // Rotate to aircraft-relative coordinates
+            float relX = dx * cosH + dz * sinH;
+            float relY = dy;
+            float relZ = -dx * sinH + dz * cosH;
+            
+            // Calculate relative heading
+            float relHeading = camPos.heading - acfHeading;
+            while (relHeading > 180.0f) relHeading -= 360.0f;
+            while (relHeading < -180.0f) relHeading += 360.0f;
+            
+            // Create new keyframe
+            CameraKeyframe newKf;
+            newKf.time = g_editingPath.keyframes.empty() ? 0.0f : g_editingPath.keyframes.back().time + 3.0f;
+            newKf.x = relX;
+            newKf.y = relY;
+            newKf.z = relZ;
+            newKf.pitch = camPos.pitch;
+            newKf.heading = relHeading;
+            newKf.roll = camPos.roll;
+            newKf.zoom = camPos.zoom;
+            newKf.focalLength = 50.0f;
+            newKf.aperture = 2.8f;
+            
+            g_editingPath.keyframes.push_back(newKf);
+            g_editingKeyframeIndex = static_cast<int>(g_editingPath.keyframes.size()) - 1;
+        }
+        
+        ImGui::SameLine();
+        if (ImGui::Button("Update Selected", ImVec2(110, 0))) {
+            if (g_editingKeyframeIndex >= 0 && g_editingKeyframeIndex < static_cast<int>(g_editingPath.keyframes.size())) {
+                // Read current camera position
+                XPLMCameraPosition_t camPos;
+                XPLMReadCameraPosition(&camPos);
+                
+                // Get aircraft position
+                float acfX = XPLMGetDataf(g_drLocalX);
+                float acfY = XPLMGetDataf(g_drLocalY);
+                float acfZ = XPLMGetDataf(g_drLocalZ);
+                float acfHeading = XPLMGetDataf(g_drHeading);
+                
+                // Transform to aircraft-relative
+                float rad = acfHeading * PI / 180.0f;
+                float cosH = std::cos(rad);
+                float sinH = std::sin(rad);
+                
+                float dx = camPos.x - acfX;
+                float dy = camPos.y - acfY;
+                float dz = camPos.z - acfZ;
+                
+                float relX = dx * cosH + dz * sinH;
+                float relY = dy;
+                float relZ = -dx * sinH + dz * cosH;
+                
+                float relHeading = camPos.heading - acfHeading;
+                while (relHeading > 180.0f) relHeading -= 360.0f;
+                while (relHeading < -180.0f) relHeading += 360.0f;
+                
+                // Update selected keyframe
+                CameraKeyframe& kf = g_editingPath.keyframes[g_editingKeyframeIndex];
+                kf.x = relX;
+                kf.y = relY;
+                kf.z = relZ;
+                kf.pitch = camPos.pitch;
+                kf.heading = relHeading;
+                kf.roll = camPos.roll;
+                kf.zoom = camPos.zoom;
+            }
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Update the selected keyframe with current camera position");
+        }
+        
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Text("Keyframes (%zu):", g_editingPath.keyframes.size());
+        
+        // Keyframe list
+        for (size_t i = 0; i < g_editingPath.keyframes.size(); ++i) {
+            ImGui::PushID(static_cast<int>(i + 1000));
+            
+            CameraKeyframe& kf = g_editingPath.keyframes[i];
+            bool isEditing = (g_editingKeyframeIndex == static_cast<int>(i));
+            
+            char label[32];
+            snprintf(label, sizeof(label), "KF %zu (%.1fs)", i + 1, kf.time);
+            
+            if (ImGui::Selectable(label, isEditing, 0, ImVec2(100, 0))) {
+                g_editingKeyframeIndex = static_cast<int>(i);
+            }
+            
+            ImGui::SameLine();
+            if (ImGui::SmallButton("-")) {
+                g_editingPath.keyframes.erase(g_editingPath.keyframes.begin() + static_cast<std::ptrdiff_t>(i));
+                if (g_editingKeyframeIndex == static_cast<int>(i)) {
+                    g_editingKeyframeIndex = -1;
+                }
+            }
+            
+            ImGui::PopID();
+        }
+        
+        // Add keyframe button
+        if (ImGui::SmallButton("+ Add Keyframe")) {
+            CameraKeyframe newKf;
+            if (!g_editingPath.keyframes.empty()) {
+                newKf = g_editingPath.keyframes.back();
+                newKf.time += 2.0f;
+            } else {
+                newKf = {0.0f, 0.0f, 10.0f, -30.0f, 10.0f, 180.0f, 0.0f, 1.0f, 50.0f, 2.8f};
+            }
+            g_editingPath.keyframes.push_back(newKf);
+            g_editingKeyframeIndex = static_cast<int>(g_editingPath.keyframes.size()) - 1;
+        }
+        
+        // Keyframe editor
+        if (g_editingKeyframeIndex >= 0 && g_editingKeyframeIndex < static_cast<int>(g_editingPath.keyframes.size())) {
+            ImGui::Spacing();
+            ImGui::Text("Edit Keyframe %d:", g_editingKeyframeIndex + 1);
+            
+            CameraKeyframe& kf = g_editingPath.keyframes[g_editingKeyframeIndex];
+            
+            ImGui::SetNextItemWidth(60);
+            ImGui::InputFloat("Time (s)", &kf.time, 0.5f, 1.0f, "%.1f");
+            
+            ImGui::Text("Position:");
+            ImGui::SetNextItemWidth(60);
+            ImGui::InputFloat("X", &kf.x, 1.0f, 5.0f, "%.1f");
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(60);
+            ImGui::InputFloat("Y", &kf.y, 1.0f, 5.0f, "%.1f");
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(60);
+            ImGui::InputFloat("Z", &kf.z, 1.0f, 5.0f, "%.1f");
+            
+            ImGui::Text("Rotation:");
+            ImGui::SetNextItemWidth(60);
+            ImGui::InputFloat("Pitch", &kf.pitch, 1.0f, 5.0f, "%.1f");
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(60);
+            ImGui::InputFloat("Heading", &kf.heading, 5.0f, 15.0f, "%.1f");
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(60);
+            ImGui::InputFloat("Roll", &kf.roll, 1.0f, 5.0f, "%.1f");
+            
+            ImGui::Text("Camera:");
+            ImGui::SetNextItemWidth(60);
+            ImGui::InputFloat("Zoom", &kf.zoom, 0.05f, 0.1f, "%.2f");
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(60);
+            ImGui::InputFloat("Focal (mm)", &kf.focalLength, 5.0f, 10.0f, "%.0f");
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(60);
+            ImGui::InputFloat("f/", &kf.aperture, 0.5f, 1.0f, "%.1f");
+        }
+        
+        ImGui::Spacing();
+        
+        // Save/Cancel buttons
+        if (ImGui::Button("Save Path", ImVec2(80, 0))) {
+            g_editingPath.name = g_pathNameBuffer;
+            
+            // Check if this is an existing path or new
+            bool found = false;
+            for (auto& path : g_customPaths) {
+                if (path.name == g_editingPath.name) {
+                    path = g_editingPath;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                g_customPaths.push_back(g_editingPath);
+            }
+            
+            SaveCustomPaths();
+            g_pathEditorOpen = false;
+        }
+        
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(80, 0))) {
+            g_pathEditorOpen = false;
+        }
+        
+        ImGui::SameLine();
+        if (ImGui::Button("Preview", ImVec2(80, 0))) {
+            // Find or add this path temporarily for preview
+            bool found = false;
+            for (size_t i = 0; i < g_customPaths.size(); ++i) {
+                if (g_customPaths[i].name == g_editingPath.name) {
+                    g_customPaths[i] = g_editingPath;
+                    g_currentCustomPathIndex = static_cast<int>(i);
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                g_customPaths.push_back(g_editingPath);
+                g_currentCustomPathIndex = static_cast<int>(g_customPaths.size()) - 1;
+            }
+            
+            g_usingCustomPath = true;
+            g_customPathTime = 0.0f;
+            if (!g_functionActive) {
+                StartCameraControl();
+            }
+        }
+    }
+    
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+    
     if (ImGui::Button("Close", ImVec2(80, 0))) {
         SetVisible(false);
     }
@@ -304,67 +703,72 @@ static void InitializeCameraShots() {
     
     // External shots - various external angles with cinematic movement
     // External shots have more pronounced position drift for dynamic feel
+    // Positions are offset away from aircraft center to avoid clipping
     g_externalShots.clear();
     
-    // Front hero shot - slow rise and zoom
-    g_externalShots.push_back({CameraType::External, 0.0f, 3.0f, -35.0f, 8.0f, 180.0f, 0.0f, 0.9f, 10.0f, "Front Hero",
-                               0.0f, 0.15f, 0.3f, -0.3f, 0.0f, 0.0f, 0.01f});
+    // Front hero shot - positioned further out and slightly offset
+    g_externalShots.push_back({CameraType::External, 5.0f, 8.0f, -55.0f, 10.0f, 175.0f, 0.0f, 0.85f, 10.0f, "Front Hero",
+                               -0.1f, 0.12f, 0.25f, -0.25f, 0.3f, 0.0f, 0.01f});
     
-    // Rear chase - following behind
-    g_externalShots.push_back({CameraType::External, 0.0f, 4.0f, 45.0f, 12.0f, 0.0f, 0.0f, 0.85f, 10.0f, "Rear Chase",
-                               0.0f, 0.1f, -0.2f, -0.2f, 0.0f, 0.0f, 0.0f});
+    // Rear chase - elevated and further back, offset to side
+    g_externalShots.push_back({CameraType::External, -8.0f, 12.0f, 65.0f, 15.0f, 8.0f, 0.0f, 0.8f, 10.0f, "Rear Chase",
+                               0.15f, 0.08f, -0.18f, -0.15f, -0.4f, 0.0f, 0.0f});
     
-    // Left flyby - dramatic side sweep
-    g_externalShots.push_back({CameraType::External, -30.0f, 2.0f, 10.0f, 3.0f, 85.0f, 0.0f, 0.9f, 12.0f, "Left Flyby",
-                               0.4f, 0.08f, -0.5f, 0.0f, 0.8f, 0.0f, 0.0f});
+    // Left flyby - further out to side, more dramatic sweep
+    g_externalShots.push_back({CameraType::External, -50.0f, 5.0f, 15.0f, 5.0f, 82.0f, 2.0f, 0.85f, 12.0f, "Left Flyby",
+                               0.5f, 0.1f, -0.6f, 0.0f, 1.0f, -0.1f, 0.0f});
     
-    // Right flyby - dramatic side sweep
-    g_externalShots.push_back({CameraType::External, 30.0f, 2.0f, 10.0f, 3.0f, -85.0f, 0.0f, 0.9f, 12.0f, "Right Flyby",
-                               -0.4f, 0.08f, -0.5f, 0.0f, -0.8f, 0.0f, 0.0f});
+    // Right flyby - further out to side, more dramatic sweep
+    g_externalShots.push_back({CameraType::External, 50.0f, 5.0f, 15.0f, 5.0f, -82.0f, -2.0f, 0.85f, 12.0f, "Right Flyby",
+                               -0.5f, 0.1f, -0.6f, 0.0f, -1.0f, 0.1f, 0.0f});
     
-    // High orbit - circling view (heading drift creates orbit effect)
-    g_externalShots.push_back({CameraType::External, 0.0f, 40.0f, 20.0f, 65.0f, 0.0f, 0.0f, 0.8f, 15.0f, "High Orbit",
-                               0.0f, 0.05f, 0.0f, 0.0f, 2.5f, 0.0f, 0.0f});
+    // High orbit - high above and further back for wide view
+    g_externalShots.push_back({CameraType::External, 15.0f, 55.0f, 35.0f, 62.0f, -15.0f, 0.0f, 0.75f, 15.0f, "High Orbit",
+                               -0.3f, 0.03f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f});
     
-    // Low angle front - dramatic upward shot
-    g_externalShots.push_back({CameraType::External, 0.0f, -8.0f, -25.0f, -25.0f, 180.0f, 0.0f, 0.95f, 8.0f, "Low Angle Front",
-                               0.0f, 0.12f, 0.15f, 0.5f, 0.0f, 0.0f, 0.0f});
+    // Low angle front - below and forward, offset to avoid fuselage
+    g_externalShots.push_back({CameraType::External, 12.0f, -12.0f, -40.0f, -22.0f, 170.0f, 3.0f, 0.9f, 8.0f, "Low Angle Front",
+                               -0.1f, 0.15f, 0.2f, 0.4f, 0.5f, -0.2f, 0.0f});
     
-    // Quarter front left - cinematic approach
-    g_externalShots.push_back({CameraType::External, -25.0f, 6.0f, -25.0f, 12.0f, 140.0f, 0.0f, 0.88f, 10.0f, "Quarter FL",
-                               0.2f, 0.08f, 0.25f, -0.15f, -1.0f, 0.0f, 0.0f});
+    // Quarter front left - wide angle approach shot
+    g_externalShots.push_back({CameraType::External, -40.0f, 12.0f, -40.0f, 14.0f, 135.0f, -1.0f, 0.82f, 10.0f, "Quarter FL",
+                               0.25f, 0.06f, 0.3f, -0.12f, -0.8f, 0.05f, 0.0f});
     
-    // Quarter front right - cinematic approach
-    g_externalShots.push_back({CameraType::External, 25.0f, 6.0f, -25.0f, 12.0f, -140.0f, 0.0f, 0.88f, 10.0f, "Quarter FR",
-                               -0.2f, 0.08f, 0.25f, -0.15f, 1.0f, 0.0f, 0.0f});
+    // Quarter front right - wide angle approach shot
+    g_externalShots.push_back({CameraType::External, 40.0f, 12.0f, -40.0f, 14.0f, -135.0f, 1.0f, 0.82f, 10.0f, "Quarter FR",
+                               -0.25f, 0.06f, 0.3f, -0.12f, 0.8f, -0.05f, 0.0f});
     
-    // Quarter rear left - departure shot
-    g_externalShots.push_back({CameraType::External, -25.0f, 10.0f, 35.0f, 18.0f, 50.0f, 0.0f, 0.85f, 10.0f, "Quarter RL",
-                               0.15f, 0.05f, -0.25f, -0.2f, -0.5f, 0.0f, 0.0f});
+    // Quarter rear left - elevated departure shot
+    g_externalShots.push_back({CameraType::External, -35.0f, 18.0f, 50.0f, 20.0f, 45.0f, 2.0f, 0.8f, 10.0f, "Quarter RL",
+                               0.2f, 0.04f, -0.2f, -0.18f, -0.6f, -0.1f, 0.0f});
     
-    // Quarter rear right - departure shot
-    g_externalShots.push_back({CameraType::External, 25.0f, 10.0f, 35.0f, 18.0f, -50.0f, 0.0f, 0.85f, 10.0f, "Quarter RR",
-                               -0.15f, 0.05f, -0.25f, -0.2f, 0.5f, 0.0f, 0.0f});
+    // Quarter rear right - elevated departure shot  
+    g_externalShots.push_back({CameraType::External, 35.0f, 18.0f, 50.0f, 20.0f, -45.0f, -2.0f, 0.8f, 10.0f, "Quarter RR",
+                               -0.2f, 0.04f, -0.2f, -0.18f, 0.6f, 0.1f, 0.0f});
     
-    // Wing tip left - close wing view
-    g_externalShots.push_back({CameraType::External, -18.0f, 3.0f, 5.0f, 8.0f, 65.0f, 0.0f, 1.05f, 8.0f, "Wing Left",
-                               0.08f, 0.03f, -0.1f, 0.0f, 0.5f, 0.0f, 0.0f});
+    // Wing tip left - close wing view with offset
+    g_externalShots.push_back({CameraType::External, -28.0f, 5.0f, 8.0f, 10.0f, 60.0f, -3.0f, 1.0f, 8.0f, "Wing Left",
+                               0.1f, 0.04f, -0.12f, 0.0f, 0.6f, 0.15f, 0.0f});
     
-    // Wing tip right - close wing view
-    g_externalShots.push_back({CameraType::External, 18.0f, 3.0f, 5.0f, 8.0f, -65.0f, 0.0f, 1.05f, 8.0f, "Wing Right",
-                               -0.08f, 0.03f, -0.1f, 0.0f, -0.5f, 0.0f, 0.0f});
+    // Wing tip right - close wing view with offset
+    g_externalShots.push_back({CameraType::External, 28.0f, 5.0f, 8.0f, 10.0f, -60.0f, 3.0f, 1.0f, 8.0f, "Wing Right",
+                               -0.1f, 0.04f, -0.12f, 0.0f, -0.6f, -0.15f, 0.0f});
     
-    // Engine close-up left
-    g_externalShots.push_back({CameraType::External, -12.0f, 1.0f, 0.0f, 5.0f, 80.0f, 0.0f, 1.3f, 7.0f, "Engine L",
-                               0.05f, 0.02f, -0.08f, 0.0f, 0.3f, 0.0f, 0.0f});
+    // Engine close-up left - positioned to see engine from outside
+    g_externalShots.push_back({CameraType::External, -20.0f, 2.0f, -5.0f, 8.0f, 75.0f, 0.0f, 1.2f, 7.0f, "Engine L",
+                               0.06f, 0.03f, -0.1f, 0.0f, 0.4f, 0.0f, 0.0f});
     
-    // Engine close-up right
-    g_externalShots.push_back({CameraType::External, 12.0f, 1.0f, 0.0f, 5.0f, -80.0f, 0.0f, 1.3f, 7.0f, "Engine R",
-                               -0.05f, 0.02f, -0.08f, 0.0f, -0.3f, 0.0f, 0.0f});
+    // Engine close-up right - positioned to see engine from outside
+    g_externalShots.push_back({CameraType::External, 20.0f, 2.0f, -5.0f, 8.0f, -75.0f, 0.0f, 1.2f, 7.0f, "Engine R",
+                               -0.06f, 0.03f, -0.1f, 0.0f, -0.4f, 0.0f, 0.0f});
     
-    // Tail view - looking back at vertical stabilizer
-    g_externalShots.push_back({CameraType::External, 0.0f, 8.0f, 50.0f, 25.0f, 5.0f, 0.0f, 0.9f, 9.0f, "Tail View",
-                               0.0f, 0.08f, -0.15f, -0.3f, -0.8f, 0.0f, 0.0f});
+    // Tail view - looking at tail from behind and above
+    g_externalShots.push_back({CameraType::External, -10.0f, 15.0f, 70.0f, 28.0f, 10.0f, 0.0f, 0.85f, 9.0f, "Tail View",
+                               0.1f, 0.06f, -0.12f, -0.25f, -0.6f, 0.0f, 0.0f});
+    
+    // Belly view - looking up at aircraft from below
+    g_externalShots.push_back({CameraType::External, 8.0f, -18.0f, 0.0f, -35.0f, -5.0f, 0.0f, 0.9f, 8.0f, "Belly View",
+                               -0.05f, 0.08f, 0.0f, 0.3f, 0.4f, 0.0f, 0.0f});
 }
 
 /**
@@ -471,6 +875,169 @@ static float NormalizeAngle(float angle) {
 static float LerpAngle(float a, float b, float t) {
     float diff = NormalizeAngle(b - a);
     return a + diff * t;
+}
+
+/**
+ * Smooth drift using sinusoidal easing for organic camera movement
+ * Creates a gentle, breathing-like motion instead of linear movement
+ */
+static float SmoothDrift(float baseValue, float driftAmount, float time, float frequency) {
+    // Use combination of sine waves at different frequencies for organic feel
+    float primary = std::sin(time * frequency * TWO_PI) * 0.5f + 0.5f;  // Main wave
+    float secondary = std::sin(time * frequency * 0.7f * TWO_PI) * 0.3f;  // Slower secondary wave
+    float tertiary = std::sin(time * frequency * 1.3f * TWO_PI) * 0.2f;   // Faster tertiary wave
+    
+    // Combine waves for natural-looking motion
+    float smoothT = primary + secondary + tertiary;
+    smoothT = std::clamp(smoothT, 0.0f, 1.0f);  // Clamp to 0-1
+    
+    return baseValue + driftAmount * smoothT;
+}
+
+/**
+ * Ease in-out sine for extra smooth interpolation
+ */
+static float EaseInOutSine(float t) {
+    return -(std::cos(PI * t) - 1.0f) / 2.0f;
+}
+
+// Note: CatmullRom spline function may be added in future for advanced path interpolation
+
+/**
+ * Interpolate between two keyframes with smooth easing
+ */
+static CameraKeyframe InterpolateKeyframes(const CameraKeyframe& a, const CameraKeyframe& b, float t) {
+    // Use ease-in-out sine for smoother interpolation
+    float smoothT = EaseInOutSine(t);
+    
+    CameraKeyframe result;
+    result.time = Lerp(a.time, b.time, t);  // Linear time
+    result.x = Lerp(a.x, b.x, smoothT);
+    result.y = Lerp(a.y, b.y, smoothT);
+    result.z = Lerp(a.z, b.z, smoothT);
+    result.pitch = Lerp(a.pitch, b.pitch, smoothT);
+    result.heading = LerpAngle(a.heading, b.heading, smoothT);
+    result.roll = Lerp(a.roll, b.roll, smoothT);
+    result.zoom = Lerp(a.zoom, b.zoom, smoothT);
+    result.focalLength = Lerp(a.focalLength, b.focalLength, smoothT);
+    result.aperture = Lerp(a.aperture, b.aperture, smoothT);
+    
+    return result;
+}
+
+/**
+ * Get the plugin directory path
+ */
+static std::string GetPluginPath() {
+    char path[512];
+    XPLMGetPluginInfo(XPLMGetMyID(), nullptr, path, nullptr, nullptr);
+    std::string pathStr(path);
+    
+    // Remove plugin filename to get directory
+    size_t lastSlash = pathStr.find_last_of("/\\");
+    if (lastSlash != std::string::npos) {
+        pathStr = pathStr.substr(0, lastSlash + 1);
+    }
+    return pathStr;
+}
+
+/**
+ * Save custom camera paths to a file
+ */
+static void SaveCustomPaths() {
+    std::string path = GetPluginPath() + "camera_paths.cfg";
+    FILE* file = fopen(path.c_str(), "w");
+    if (!file) {
+        XPLMDebugString("MovieCamera: Failed to save custom paths\n");
+        return;
+    }
+    
+    fprintf(file, "# MovieCamera Custom Camera Paths\n");
+    fprintf(file, "version 1\n");
+    fprintf(file, "paths %zu\n", g_customPaths.size());
+    
+    for (const auto& cpath : g_customPaths) {
+        fprintf(file, "\npath_start\n");
+        fprintf(file, "name %s\n", cpath.name.c_str());
+        fprintf(file, "type %d\n", static_cast<int>(cpath.type));
+        fprintf(file, "looping %d\n", cpath.isLooping ? 1 : 0);
+        fprintf(file, "keyframes %zu\n", cpath.keyframes.size());
+        
+        for (const auto& kf : cpath.keyframes) {
+            fprintf(file, "kf %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f\n",
+                    kf.time, kf.x, kf.y, kf.z, kf.pitch, kf.heading, kf.roll,
+                    kf.zoom, kf.focalLength, kf.aperture);
+        }
+        fprintf(file, "path_end\n");
+    }
+    
+    fclose(file);
+    XPLMDebugString("MovieCamera: Custom paths saved\n");
+}
+
+/**
+ * Load custom camera paths from a file
+ */
+static void LoadCustomPaths() {
+    std::string path = GetPluginPath() + "camera_paths.cfg";
+    FILE* file = fopen(path.c_str(), "r");
+    if (!file) {
+        // No saved paths file - that's OK
+        return;
+    }
+    
+    g_customPaths.clear();
+    
+    char line[256];
+    
+    while (fgets(line, sizeof(line), file)) {
+        if (line[0] == '#') continue;
+        
+        if (strncmp(line, "path_start", 10) == 0) {
+            CustomCameraPath cpath;
+            cpath.isLooping = false;
+            cpath.type = CameraType::External;
+            
+            while (fgets(line, sizeof(line), file)) {
+                if (strncmp(line, "path_end", 8) == 0) break;
+                
+                if (strncmp(line, "name ", 5) == 0) {
+                    // Safe string parsing with bounds checking
+                    char name[64] = {0};
+                    int result = sscanf(line + 5, "%63[^\n]", name);
+                    if (result == 1) {
+                        cpath.name = name;
+                    }
+                } else if (strncmp(line, "type ", 5) == 0) {
+                    int typeVal = atoi(line + 5);
+                    if (typeVal == 0 || typeVal == 1) {
+                        cpath.type = static_cast<CameraType>(typeVal);
+                    }
+                } else if (strncmp(line, "looping ", 8) == 0) {
+                    cpath.isLooping = (atoi(line + 8) != 0);
+                } else if (strncmp(line, "kf ", 3) == 0) {
+                    CameraKeyframe kf = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 50.0f, 2.8f};
+                    int parsed = sscanf(line + 3, "%f %f %f %f %f %f %f %f %f %f",
+                           &kf.time, &kf.x, &kf.y, &kf.z, &kf.pitch, &kf.heading,
+                           &kf.roll, &kf.zoom, &kf.focalLength, &kf.aperture);
+                    // Only add keyframe if all 10 values were successfully parsed
+                    if (parsed == 10) {
+                        cpath.keyframes.push_back(kf);
+                    }
+                }
+            }
+            
+            if (!cpath.name.empty()) {
+                g_customPaths.push_back(cpath);
+            }
+        }
+    }
+    
+    fclose(file);
+    
+    char msg[128];
+    snprintf(msg, sizeof(msg), "MovieCamera: Loaded %zu custom paths\n", g_customPaths.size());
+    XPLMDebugString(msg);
 }
 
 /**
@@ -590,7 +1157,7 @@ static void StartCameraControl() {
     float acfZ = XPLMGetDataf(g_drLocalZ);
     float acfHeading = XPLMGetDataf(g_drHeading);
     
-    float rad = acfHeading * 3.14159f / 180.0f;
+    float rad = acfHeading * PI / 180.0f;
     float cosH = std::cos(rad);
     float sinH = std::sin(rad);
     
@@ -672,8 +1239,62 @@ static int CameraControlCallback(XPLMCameraPosition_t* outCameraPosition, int in
     float acfZ = XPLMGetDataf(g_drLocalZ);
     float acfHeading = XPLMGetDataf(g_drHeading);
     
+    // Check if using custom camera path
+    if (g_usingCustomPath && g_currentCustomPathIndex >= 0 && 
+        g_currentCustomPathIndex < static_cast<int>(g_customPaths.size())) {
+        
+        const CustomCameraPath& cpath = g_customPaths[g_currentCustomPathIndex];
+        if (cpath.keyframes.size() >= 2) {
+            float pathTime = g_customPathTime;
+            float totalDuration = cpath.getTotalDuration();
+            
+            // Handle looping
+            if (cpath.isLooping && totalDuration > 0.0f) {
+                pathTime = std::fmod(pathTime, totalDuration);
+            }
+            
+            // Find the two keyframes to interpolate between
+            size_t kfIndex = 0;
+            for (size_t i = 0; i < cpath.keyframes.size() - 1; ++i) {
+                if (pathTime >= cpath.keyframes[i].time && pathTime < cpath.keyframes[i + 1].time) {
+                    kfIndex = i;
+                    break;
+                }
+                if (i == cpath.keyframes.size() - 2) {
+                    kfIndex = i;
+                }
+            }
+            
+            const CameraKeyframe& kf1 = cpath.keyframes[kfIndex];
+            const CameraKeyframe& kf2 = cpath.keyframes[std::min(kfIndex + 1, cpath.keyframes.size() - 1)];
+            
+            // Calculate interpolation factor
+            float segmentDuration = kf2.time - kf1.time;
+            float t = (segmentDuration > 0.001f) ? (pathTime - kf1.time) / segmentDuration : 0.0f;
+            t = std::max(0.0f, std::min(1.0f, t));
+            
+            // Interpolate keyframes with smooth easing
+            CameraKeyframe interpolated = InterpolateKeyframes(kf1, kf2, t);
+            
+            // Transform to world coordinates
+            float rad = acfHeading * PI / 180.0f;
+            float cosH = std::cos(rad);
+            float sinH = std::sin(rad);
+            
+            outCameraPosition->x = acfX + interpolated.x * cosH - interpolated.z * sinH;
+            outCameraPosition->y = acfY + interpolated.y;
+            outCameraPosition->z = acfZ + interpolated.x * sinH + interpolated.z * cosH;
+            outCameraPosition->pitch = interpolated.pitch;
+            outCameraPosition->heading = acfHeading + interpolated.heading;
+            outCameraPosition->roll = interpolated.roll;
+            outCameraPosition->zoom = interpolated.zoom;
+            
+            return 1;
+        }
+    }
+    
     if (g_inTransition) {
-        // Smooth transition between shots
+        // Smooth transition between shots using ease-in-out
         float t = EaseInOutCubic(g_transitionProgress);
         
         outCameraPosition->x = Lerp(g_startPos.x, g_targetPos.x, t);
@@ -684,27 +1305,27 @@ static int CameraControlCallback(XPLMCameraPosition_t* outCameraPosition, int in
         outCameraPosition->roll = Lerp(g_startPos.roll, g_targetPos.roll, t);
         outCameraPosition->zoom = Lerp(g_startPos.zoom, g_targetPos.zoom, t);
     } else {
-        // Apply shot with cinematic drift
-        // Use stored g_currentShot which contains drift parameters
-        float rad = acfHeading * 3.14159f / 180.0f;
+        // Apply shot with SMOOTH cinematic drift using sinusoidal easing
+        float rad = acfHeading * PI / 180.0f;
         float cosH = std::cos(rad);
         float sinH = std::sin(rad);
         
-        // Calculate drift offset based on elapsed time in this shot
+        // Calculate drift offset using smooth sinusoidal motion instead of linear
         float driftTime = g_shotElapsedTime;
+        float driftFrequency = 0.1f;  // Slow frequency for gentle motion
         
-        // Position drift (relative to aircraft, then transformed to world)
-        float driftedX = g_currentShot.x + g_currentShot.driftX * driftTime;
-        float driftedY = g_currentShot.y + g_currentShot.driftY * driftTime;
-        float driftedZ = g_currentShot.z + g_currentShot.driftZ * driftTime;
+        // Position drift with smooth oscillation (creates floating effect)
+        float driftedX = SmoothDrift(g_currentShot.x, g_currentShot.driftX * g_currentShot.duration, driftTime, driftFrequency);
+        float driftedY = SmoothDrift(g_currentShot.y, g_currentShot.driftY * g_currentShot.duration, driftTime, driftFrequency * 0.8f);
+        float driftedZ = SmoothDrift(g_currentShot.z, g_currentShot.driftZ * g_currentShot.duration, driftTime, driftFrequency * 1.1f);
         
-        // Rotation drift
-        float driftedPitch = g_currentShot.pitch + g_currentShot.driftPitch * driftTime;
-        float driftedHeading = g_currentShot.heading + g_currentShot.driftHeading * driftTime;
-        float driftedRoll = g_currentShot.roll + g_currentShot.driftRoll * driftTime;
+        // Rotation drift with different frequencies for organic feel
+        float driftedPitch = SmoothDrift(g_currentShot.pitch, g_currentShot.driftPitch * g_currentShot.duration, driftTime, driftFrequency * 0.9f);
+        float driftedHeading = SmoothDrift(g_currentShot.heading, g_currentShot.driftHeading * g_currentShot.duration, driftTime, driftFrequency * 0.7f);
+        float driftedRoll = SmoothDrift(g_currentShot.roll, g_currentShot.driftRoll * g_currentShot.duration, driftTime, driftFrequency * 1.2f);
         
-        // Zoom drift (for cockpit shots - simulates aperture/DOF breathing)
-        float driftedZoom = g_currentShot.zoom + g_currentShot.driftZoom * driftTime;
+        // Zoom drift with smooth breathing effect
+        float driftedZoom = SmoothDrift(g_currentShot.zoom, g_currentShot.driftZoom * g_currentShot.duration, driftTime, driftFrequency * 0.5f);
         
         // Transform position offset from aircraft-relative to world coordinates
         outCameraPosition->x = acfX + driftedX * cosH - driftedZ * sinH;
@@ -769,7 +1390,22 @@ static float FlightLoopCallback(float inElapsedSinceLastCall, float inElapsedTim
     
     // Update camera shot timing
     if (g_functionActive && !g_functionPaused) {
-        if (g_inTransition) {
+        // Update custom path time if using custom path
+        if (g_usingCustomPath && g_currentCustomPathIndex >= 0 && 
+            g_currentCustomPathIndex < static_cast<int>(g_customPaths.size())) {
+            
+            g_customPathTime += inElapsedSinceLastCall;
+            
+            const CustomCameraPath& cpath = g_customPaths[g_currentCustomPathIndex];
+            float totalDuration = cpath.getTotalDuration();
+            
+            // Check if path has finished (non-looping)
+            if (!cpath.isLooping && g_customPathTime >= totalDuration) {
+                g_usingCustomPath = false;
+                g_currentCustomPathIndex = -1;
+                // Continue with normal shot rotation
+            }
+        } else if (g_inTransition) {
             g_transitionProgress += inElapsedSinceLastCall / g_transitionDuration;
             if (g_transitionProgress >= 1.0f) {
                 g_inTransition = false;
@@ -794,7 +1430,7 @@ static float FlightLoopCallback(float inElapsedSinceLastCall, float inElapsedTim
                 float acfZ = XPLMGetDataf(g_drLocalZ);
                 float acfHeading = XPLMGetDataf(g_drHeading);
                 
-                float rad = acfHeading * 3.14159f / 180.0f;
+                float rad = acfHeading * PI / 180.0f;
                 float cosH = std::cos(rad);
                 float sinH = std::sin(rad);
                 
@@ -814,6 +1450,115 @@ static float FlightLoopCallback(float inElapsedSinceLastCall, float inElapsedTim
     }
     
     return -1.0f;  // Call every frame
+}
+
+/**
+ * Draw callback to visualize camera trajectory in 3D space
+ */
+static int DrawTrajectoryCallback(XPLMDrawingPhase inPhase, int inIsBefore, void* inRefcon) {
+    (void)inPhase;
+    (void)inIsBefore;
+    (void)inRefcon;
+    
+    // Only draw if trajectory preview is enabled and we have a path being edited
+    if (!g_showTrajectoryPreview || !g_pathEditorOpen || g_editingPath.keyframes.size() < 2) {
+        return 1;
+    }
+    
+    // Get aircraft position
+    float acfX = XPLMGetDataf(g_drLocalX);
+    float acfY = XPLMGetDataf(g_drLocalY);
+    float acfZ = XPLMGetDataf(g_drLocalZ);
+    float acfHeading = XPLMGetDataf(g_drHeading);
+    
+    float rad = acfHeading * PI / 180.0f;
+    float cosH = std::cos(rad);
+    float sinH = std::sin(rad);
+    
+    // Set up OpenGL state for drawing lines
+    XPLMSetGraphicsState(0, 0, 0, 0, 1, 1, 0);
+    
+    // Draw trajectory line (green color)
+    glColor4f(0.0f, 1.0f, 0.3f, 0.8f);
+    glLineWidth(3.0f);
+    glBegin(GL_LINE_STRIP);
+    
+    // Sample trajectory at regular intervals
+    float totalDuration = g_editingPath.getTotalDuration();
+    int numSamples = static_cast<int>(totalDuration * 10.0f);  // 10 samples per second
+    if (numSamples < 20) numSamples = 20;
+    if (numSamples > 200) numSamples = 200;
+    
+    for (int i = 0; i <= numSamples; ++i) {
+        float t = static_cast<float>(i) / static_cast<float>(numSamples);
+        float pathTime = t * totalDuration;
+        
+        // Find keyframes to interpolate
+        size_t kfIndex = 0;
+        for (size_t j = 0; j < g_editingPath.keyframes.size() - 1; ++j) {
+            if (pathTime >= g_editingPath.keyframes[j].time && 
+                pathTime < g_editingPath.keyframes[j + 1].time) {
+                kfIndex = j;
+                break;
+            }
+            if (j == g_editingPath.keyframes.size() - 2) {
+                kfIndex = j;
+            }
+        }
+        
+        const CameraKeyframe& kf1 = g_editingPath.keyframes[kfIndex];
+        const CameraKeyframe& kf2 = g_editingPath.keyframes[std::min(kfIndex + 1, g_editingPath.keyframes.size() - 1)];
+        
+        float segDuration = kf2.time - kf1.time;
+        float segT = (segDuration > 0.001f) ? (pathTime - kf1.time) / segDuration : 0.0f;
+        segT = std::clamp(segT, 0.0f, 1.0f);
+        
+        // Interpolate position with easing
+        float smoothT = EaseInOutSine(segT);
+        float posX = Lerp(kf1.x, kf2.x, smoothT);
+        float posY = Lerp(kf1.y, kf2.y, smoothT);
+        float posZ = Lerp(kf1.z, kf2.z, smoothT);
+        
+        // Transform to world coordinates
+        float worldX = acfX + posX * cosH - posZ * sinH;
+        float worldY = acfY + posY;
+        float worldZ = acfZ + posX * sinH + posZ * cosH;
+        
+        glVertex3f(worldX, worldY, worldZ);
+    }
+    glEnd();
+    
+    // Draw keyframe points (yellow spheres approximated with points)
+    glColor4f(1.0f, 1.0f, 0.0f, 1.0f);
+    glPointSize(10.0f);
+    glBegin(GL_POINTS);
+    for (size_t i = 0; i < g_editingPath.keyframes.size(); ++i) {
+        const CameraKeyframe& kf = g_editingPath.keyframes[i];
+        float worldX = acfX + kf.x * cosH - kf.z * sinH;
+        float worldY = acfY + kf.y;
+        float worldZ = acfZ + kf.x * sinH + kf.z * cosH;
+        glVertex3f(worldX, worldY, worldZ);
+    }
+    glEnd();
+    
+    // Highlight selected keyframe (red)
+    if (g_editingKeyframeIndex >= 0 && g_editingKeyframeIndex < static_cast<int>(g_editingPath.keyframes.size())) {
+        const CameraKeyframe& kf = g_editingPath.keyframes[g_editingKeyframeIndex];
+        float worldX = acfX + kf.x * cosH - kf.z * sinH;
+        float worldY = acfY + kf.y;
+        float worldZ = acfZ + kf.x * sinH + kf.z * cosH;
+        
+        glColor4f(1.0f, 0.2f, 0.2f, 1.0f);
+        glPointSize(15.0f);
+        glBegin(GL_POINTS);
+        glVertex3f(worldX, worldY, worldZ);
+        glEnd();
+    }
+    
+    glLineWidth(1.0f);
+    glPointSize(1.0f);
+    
+    return 1;
 }
 
 /**
@@ -846,6 +1591,9 @@ PLUGIN_API int XPluginStart(char* outName, char* outSig, char* outDesc) {
     
     // Initialize camera shots
     InitializeCameraShots();
+    
+    // Load custom camera paths
+    LoadCustomPaths();
     
     // Create menu
     int pluginMenuIndex = XPLMAppendMenuItem(XPLMFindPluginsMenu(), PLUGIN_NAME, nullptr, 0);
@@ -895,6 +1643,9 @@ PLUGIN_API int XPluginEnable(void) {
     g_flightLoopId = XPLMCreateFlightLoop(&flightLoopParams);
     XPLMScheduleFlightLoop(g_flightLoopId, -1.0f, 1);
     
+    // Register draw callback for trajectory visualization
+    XPLMRegisterDrawCallback(DrawTrajectoryCallback, xplm_Phase_Modern3D, 0, nullptr);
+    
     // Create settings window
     g_settingsWindow = std::make_unique<SettingsWindow>();
     g_settingsWindow->SetVisible(false);
@@ -917,6 +1668,9 @@ PLUGIN_API void XPluginDisable(void) {
     if (g_functionActive) {
         StopCameraControl();
     }
+    
+    // Unregister draw callback
+    XPLMUnregisterDrawCallback(DrawTrajectoryCallback, xplm_Phase_Modern3D, 0, nullptr);
     
     // Destroy flight loop
     if (g_flightLoopId) {
