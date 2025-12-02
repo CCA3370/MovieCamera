@@ -206,7 +206,7 @@ static bool CheckAutoConditions();
 static CameraShot SelectNextShot();
 static float Lerp(float a, float b, float t);
 static float EaseInOutCubic(float t);
-static float SmoothDrift(float baseValue, float driftAmount, float time, float frequency);
+static float LinearDrift(float baseValue, float driftAmount, float normalizedTime);
 static CameraKeyframe InterpolateKeyframes(const CameraKeyframe& a, const CameraKeyframe& b, float t);
 static void SaveCustomPaths();
 static void LoadCustomPaths();
@@ -883,19 +883,14 @@ static float LerpAngle(float a, float b, float t) {
 }
 
 /**
- * Smooth drift using sinusoidal easing for organic camera movement
- * Creates a gentle, breathing-like motion instead of linear movement
+ * Linear drift with smooth ease-in-out for consistent camera movement
+ * Creates a steady, directional drift like cinematic camera movements
+ * Once a drift direction is set, it maintains that direction throughout the shot
  */
-static float SmoothDrift(float baseValue, float driftAmount, float time, float frequency) {
-    // Use combination of sine waves at different frequencies for organic feel
-    float primary = std::sin(time * frequency * TWO_PI) * 0.5f + 0.5f;  // Main wave
-    float secondary = std::sin(time * frequency * 0.7f * TWO_PI) * 0.3f;  // Slower secondary wave
-    float tertiary = std::sin(time * frequency * 1.3f * TWO_PI) * 0.2f;   // Faster tertiary wave
-    
-    // Combine waves for natural-looking motion
-    float smoothT = primary + secondary + tertiary;
-    smoothT = std::clamp(smoothT, 0.0f, 1.0f);  // Clamp to 0-1
-    
+static float LinearDrift(float baseValue, float driftAmount, float normalizedTime) {
+    // Use ease-in-out for smooth start and end of drift
+    // normalizedTime is 0 at start, 1 at end of shot
+    float smoothT = EaseInOutCubic(normalizedTime);
     return baseValue + driftAmount * smoothT;
 }
 
@@ -1310,27 +1305,28 @@ static int CameraControlCallback(XPLMCameraPosition_t* outCameraPosition, int in
         outCameraPosition->roll = Lerp(g_startPos.roll, g_targetPos.roll, t);
         outCameraPosition->zoom = Lerp(g_startPos.zoom, g_targetPos.zoom, t);
     } else {
-        // Apply shot with SMOOTH cinematic drift using sinusoidal easing
+        // Apply shot with consistent linear drift - like Horizon game
+        // Once drift direction is set at shot start, maintain it throughout
         float rad = acfHeading * PI / 180.0f;
         float cosH = std::cos(rad);
         float sinH = std::sin(rad);
         
-        // Calculate drift offset using smooth sinusoidal motion instead of linear
-        float driftTime = g_shotElapsedTime;
-        float driftFrequency = 0.1f;  // Slow frequency for gentle motion
+        // Calculate normalized time (0 at start, 1 at end of shot)
+        float normalizedTime = g_shotElapsedTime / g_currentShot.duration;
+        normalizedTime = std::clamp(normalizedTime, 0.0f, 1.0f);
         
-        // Position drift with smooth oscillation (creates floating effect)
-        float driftedX = SmoothDrift(g_currentShot.x, g_currentShot.driftX * g_currentShot.duration, driftTime, driftFrequency);
-        float driftedY = SmoothDrift(g_currentShot.y, g_currentShot.driftY * g_currentShot.duration, driftTime, driftFrequency * 0.8f);
-        float driftedZ = SmoothDrift(g_currentShot.z, g_currentShot.driftZ * g_currentShot.duration, driftTime, driftFrequency * 1.1f);
+        // Position drift with smooth ease-in-out (consistent direction throughout shot)
+        float driftedX = LinearDrift(g_currentShot.x, g_currentShot.driftX * g_currentShot.duration, normalizedTime);
+        float driftedY = LinearDrift(g_currentShot.y, g_currentShot.driftY * g_currentShot.duration, normalizedTime);
+        float driftedZ = LinearDrift(g_currentShot.z, g_currentShot.driftZ * g_currentShot.duration, normalizedTime);
         
-        // Rotation drift with different frequencies for organic feel
-        float driftedPitch = SmoothDrift(g_currentShot.pitch, g_currentShot.driftPitch * g_currentShot.duration, driftTime, driftFrequency * 0.9f);
-        float driftedHeading = SmoothDrift(g_currentShot.heading, g_currentShot.driftHeading * g_currentShot.duration, driftTime, driftFrequency * 0.7f);
-        float driftedRoll = SmoothDrift(g_currentShot.roll, g_currentShot.driftRoll * g_currentShot.duration, driftTime, driftFrequency * 1.2f);
+        // Rotation drift with same consistent direction
+        float driftedPitch = LinearDrift(g_currentShot.pitch, g_currentShot.driftPitch * g_currentShot.duration, normalizedTime);
+        float driftedHeading = LinearDrift(g_currentShot.heading, g_currentShot.driftHeading * g_currentShot.duration, normalizedTime);
+        float driftedRoll = LinearDrift(g_currentShot.roll, g_currentShot.driftRoll * g_currentShot.duration, normalizedTime);
         
-        // Zoom drift with smooth breathing effect
-        float driftedZoom = SmoothDrift(g_currentShot.zoom, g_currentShot.driftZoom * g_currentShot.duration, driftTime, driftFrequency * 0.5f);
+        // Zoom drift with same consistent direction
+        float driftedZoom = LinearDrift(g_currentShot.zoom, g_currentShot.driftZoom * g_currentShot.duration, normalizedTime);
         
         // Transform position offset from aircraft-relative to world coordinates
         outCameraPosition->x = acfX + driftedX * cosH - driftedZ * sinH;
@@ -1481,7 +1477,9 @@ static int DrawTrajectoryCallback(XPLMDrawingPhase inPhase, int inIsBefore, void
     float sinH = std::sin(rad);
     
     // Set up OpenGL state for drawing lines
-    XPLMSetGraphicsState(0, 0, 0, 0, 1, 1, 0);
+    // XPLMSetGraphicsState(fog, numberTexUnits, lighting, alphaTesting, alphaBlending, depthTesting, depthWriting)
+    // Disable depth testing (param 6) to ensure lines are always visible
+    XPLMSetGraphicsState(0, 0, 0, 0, 1, 0, 0);
     
     // Draw trajectory line (green color)
     glColor4f(0.0f, 1.0f, 0.3f, 0.8f);
@@ -1649,6 +1647,7 @@ PLUGIN_API int XPluginEnable(void) {
     XPLMScheduleFlightLoop(g_flightLoopId, -1.0f, 1);
     
     // Register draw callback for trajectory visualization
+    // Use xplm_Phase_Modern3D for X-Plane 11.50+ compatibility
     XPLMRegisterDrawCallback(DrawTrajectoryCallback, xplm_Phase_Modern3D, 0, nullptr);
     
     // Create settings window
