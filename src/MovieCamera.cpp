@@ -1504,9 +1504,19 @@ static void StartCameraControl() {
     float cosH = std::cos(rad);
     float sinH = std::sin(rad);
     
-    g_targetPos.x = acfX + firstShot.x * cosH - firstShot.z * sinH;
-    g_targetPos.y = acfY + firstShot.y;
-    g_targetPos.z = acfZ + firstShot.x * sinH + firstShot.z * cosH;
+    // For cockpit shots, add pilot eye position as base offset
+    float shotX = firstShot.x;
+    float shotY = firstShot.y;
+    float shotZ = firstShot.z;
+    if (firstShot.type == CameraType::Cockpit) {
+        shotX += g_aircraftDims.pilotEyeX;
+        shotY += g_aircraftDims.pilotEyeY;
+        shotZ += g_aircraftDims.pilotEyeZ;
+    }
+    
+    g_targetPos.x = acfX + shotX * cosH - shotZ * sinH;
+    g_targetPos.y = acfY + shotY;
+    g_targetPos.z = acfZ + shotX * sinH + shotZ * cosH;
     g_targetPos.pitch = firstShot.pitch;
     g_targetPos.heading = acfHeading + firstShot.heading;
     g_targetPos.roll = firstShot.roll;
@@ -1663,6 +1673,14 @@ static int CameraControlCallback(XPLMCameraPosition_t* outCameraPosition, int in
         float driftedY = LinearDrift(g_currentShot.y, g_currentShot.driftY * g_currentShot.duration, normalizedTime);
         float driftedZ = LinearDrift(g_currentShot.z, g_currentShot.driftZ * g_currentShot.duration, normalizedTime);
         
+        // For cockpit shots, add pilot eye position as base offset
+        // This ensures cockpit views are in the cockpit, not at the aircraft origin (CG)
+        if (g_currentShot.type == CameraType::Cockpit) {
+            driftedX += g_aircraftDims.pilotEyeX;
+            driftedY += g_aircraftDims.pilotEyeY;
+            driftedZ += g_aircraftDims.pilotEyeZ;
+        }
+        
         // Rotation drift with same consistent direction
         float driftedPitch = LinearDrift(g_currentShot.pitch, g_currentShot.driftPitch * g_currentShot.duration, normalizedTime);
         float driftedHeading = LinearDrift(g_currentShot.heading, g_currentShot.driftHeading * g_currentShot.duration, normalizedTime);
@@ -1778,9 +1796,19 @@ static float FlightLoopCallback(float inElapsedSinceLastCall, float inElapsedTim
                 float cosH = std::cos(rad);
                 float sinH = std::sin(rad);
                 
-                g_targetPos.x = acfX + nextShot.x * cosH - nextShot.z * sinH;
-                g_targetPos.y = acfY + nextShot.y;
-                g_targetPos.z = acfZ + nextShot.x * sinH + nextShot.z * cosH;
+                // For cockpit shots, add pilot eye position as base offset
+                float shotX = nextShot.x;
+                float shotY = nextShot.y;
+                float shotZ = nextShot.z;
+                if (nextShot.type == CameraType::Cockpit) {
+                    shotX += g_aircraftDims.pilotEyeX;
+                    shotY += g_aircraftDims.pilotEyeY;
+                    shotZ += g_aircraftDims.pilotEyeZ;
+                }
+                
+                g_targetPos.x = acfX + shotX * cosH - shotZ * sinH;
+                g_targetPos.y = acfY + shotY;
+                g_targetPos.z = acfZ + shotX * sinH + shotZ * cosH;
                 g_targetPos.pitch = nextShot.pitch;
                 g_targetPos.heading = acfHeading + nextShot.heading;
                 g_targetPos.roll = nextShot.roll;
