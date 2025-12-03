@@ -110,6 +110,18 @@ constexpr float MAX_FUSELAGE_LENGTH = 100.0f;      // Maximum valid fuselage len
 constexpr float MIN_HEIGHT = 2.0f;                 // Minimum valid aircraft height (meters)
 constexpr float MAX_HEIGHT = 30.0f;                // Maximum valid aircraft height (meters)
 
+// Estimation multipliers for deriving aircraft dimensions from limited data
+// CG range is typically 20-30% of total fuselage length
+constexpr float CG_TO_FUSELAGE_MULTIPLIER = 4.0f;
+// Pilot is typically located 30-40% from nose, so multiply Z position to estimate length
+constexpr float PILOT_Z_TO_FUSELAGE_MULTIPLIER = 2.5f;
+// Pilot eye is typically at 60-80% of aircraft height
+constexpr float PILOT_Y_TO_HEIGHT_MULTIPLIER = 1.5f;
+// Ground clearance estimation (meters)
+constexpr float ESTIMATED_GROUND_CLEARANCE = 2.0f;
+// Minimum valid CG range to use for estimation (meters)
+constexpr float MIN_VALID_CG_RANGE = 0.5f;
+
 /**
  * Aircraft dimensions structure
  * Stores dimensions read from X-Plane datarefs to calculate dynamic camera positions
@@ -849,31 +861,30 @@ static void ReadAircraftDimensions() {
     if (g_drAcfCgZFwd) cgZFwd = XPLMGetDataf(g_drAcfCgZFwd);
     if (g_drAcfCgZAft) cgZAft = XPLMGetDataf(g_drAcfCgZAft);
     
-    // Calculate fuselage length from CG range (multiply to estimate full length)
-    // The CG range is typically 20-30% of fuselage length, so we multiply by ~4
+    // Calculate fuselage length from CG range
     if (cgZFwd != 0.0f || cgZAft != 0.0f) {
         float cgRange = std::abs(cgZAft - cgZFwd);
-        if (cgRange > 0.5f) {  // Valid CG range
-            g_aircraftDims.fuselageLength = cgRange * 4.0f;  // Estimate full fuselage length
+        if (cgRange > MIN_VALID_CG_RANGE) {
+            g_aircraftDims.fuselageLength = cgRange * CG_TO_FUSELAGE_MULTIPLIER;
         }
     }
     
     // Alternative: Use pilot eye Z position to estimate aircraft size
-    // Pilot is typically 20-40% from nose, so multiply pilotEyeZ accordingly
+    // This is used if CG-based estimation didn't provide a valid result
     if (g_aircraftDims.pilotEyeZ != 0.0f && g_aircraftDims.fuselageLength < MIN_FUSELAGE_LENGTH + 1.0f) {
-        g_aircraftDims.fuselageLength = std::abs(g_aircraftDims.pilotEyeZ) * 2.5f;
+        g_aircraftDims.fuselageLength = std::abs(g_aircraftDims.pilotEyeZ) * PILOT_Z_TO_FUSELAGE_MULTIPLIER;
     }
     
-    // Read height from Y datarefs if available
-    float minY = 0.0f, maxY = 0.0f;
+    // Read height from gear Y position if available, otherwise use pilot eye
+    float minY = 0.0f;
     if (g_drAcfMinY) minY = XPLMGetDataf(g_drAcfMinY);
-    if (g_drAcfMaxY) maxY = XPLMGetDataf(g_drAcfMaxY);
     
-    if (minY != 0.0f || maxY != 0.0f) {
-        g_aircraftDims.height = std::abs(maxY - minY);
+    if (minY != 0.0f && g_aircraftDims.pilotEyeY > 0.0f) {
+        // Calculate height from gear to pilot eye position, plus estimated distance above pilot
+        g_aircraftDims.height = g_aircraftDims.pilotEyeY - minY + ESTIMATED_GROUND_CLEARANCE;
     } else if (g_aircraftDims.pilotEyeY > 0.0f) {
-        // Estimate height from pilot eye Y (pilot is typically at 60-80% of height)
-        g_aircraftDims.height = g_aircraftDims.pilotEyeY * 1.5f + 2.0f;  // Add ground clearance
+        // Estimate height from pilot eye Y position plus ground clearance
+        g_aircraftDims.height = g_aircraftDims.pilotEyeY * PILOT_Y_TO_HEIGHT_MULTIPLIER + ESTIMATED_GROUND_CLEARANCE;
     }
     
     // Read wingspan if available
@@ -1925,25 +1936,23 @@ PLUGIN_API int XPluginStart(char* outName, char* outSig, char* outDesc) {
     g_drViewType = XPLMFindDataRef("sim/graphics/view/view_type");
     
     // Find aircraft dimension datarefs (loaded from .acf file by X-Plane)
-    // Try to find proper aircraft geometry datarefs first
+    // Primary source: direct aircraft geometry datarefs
     g_drAcfWingSpan = XPLMFindDataRef("sim/aircraft/parts/acf_wing_span");
-    if (!g_drAcfWingSpan) {
-        // Fallback datarefs if preferred ones not available
-        g_drAcfWingSpan = XPLMFindDataRef("sim/aircraft/view/acf_RSC_LET_rat");  // Another potential source
-    }
+    // Note: No reliable fallback for wingspan - will use pilot eye based estimation if unavailable
     
     // CG limits provide good approximation of aircraft length
     g_drAcfCgZFwd = XPLMFindDataRef("sim/aircraft/overflow/acf_cgZ_fwd");  // Forward CG limit
     g_drAcfCgZAft = XPLMFindDataRef("sim/aircraft/overflow/acf_cgZ_aft");  // Aft CG limit
     
-    // Height estimation from various sources
+    // Height estimation sources
     g_drAcfMinY = XPLMFindDataRef("sim/aircraft/parts/acf_gear_ynodef");  // Gear Y position for ground clearance
-    g_drAcfMaxY = XPLMFindDataRef("sim/aircraft/view/acf_peY");  // Use pilot eye Y as height reference
+    // Note: g_drAcfMaxY not used directly; height estimated from pilot eye position in ReadAircraftDimensions()
+    g_drAcfMaxY = nullptr;
     
-    // Pilot eye position - most reliable datarefs
-    g_drAcfPeX = XPLMFindDataRef("sim/aircraft/view/acf_peX");   // Pilot eye X
-    g_drAcfPeY = XPLMFindDataRef("sim/aircraft/view/acf_peY");   // Pilot eye Y
-    g_drAcfPeZ = XPLMFindDataRef("sim/aircraft/view/acf_peZ");   // Pilot eye Z
+    // Pilot eye position - most reliable datarefs for aircraft size estimation
+    g_drAcfPeX = XPLMFindDataRef("sim/aircraft/view/acf_peX");   // Pilot eye X (lateral offset)
+    g_drAcfPeY = XPLMFindDataRef("sim/aircraft/view/acf_peY");   // Pilot eye Y (height from CG)
+    g_drAcfPeZ = XPLMFindDataRef("sim/aircraft/view/acf_peZ");   // Pilot eye Z (longitudinal from CG)
     
     // Initialize with default camera shots first
     InitializeCameraShots();
