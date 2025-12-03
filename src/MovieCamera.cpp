@@ -99,6 +99,17 @@ struct CustomCameraPath {
     }
 };
 
+// Aircraft dimension constants
+constexpr float STANDARD_WINGSPAN = 35.0f;         // Standard wingspan for scaling (meters, similar to B737/A320)
+constexpr float STANDARD_FUSELAGE_LENGTH = 40.0f;  // Standard fuselage length (meters)
+constexpr float STANDARD_HEIGHT = 12.0f;           // Standard aircraft height (meters)
+constexpr float MIN_WINGSPAN = 5.0f;               // Minimum valid wingspan (meters)
+constexpr float MAX_WINGSPAN = 100.0f;             // Maximum valid wingspan (meters)
+constexpr float MIN_FUSELAGE_LENGTH = 5.0f;        // Minimum valid fuselage length (meters)
+constexpr float MAX_FUSELAGE_LENGTH = 100.0f;      // Maximum valid fuselage length (meters)
+constexpr float MIN_HEIGHT = 2.0f;                 // Minimum valid aircraft height (meters)
+constexpr float MAX_HEIGHT = 30.0f;                // Maximum valid aircraft height (meters)
+
 /**
  * Aircraft dimensions structure
  * Stores dimensions read from X-Plane datarefs to calculate dynamic camera positions
@@ -113,9 +124,9 @@ struct AircraftDimensions {
     
     // Default values for a medium-sized aircraft (similar to B737/A320)
     void setDefaults() {
-        wingspan = 35.0f;
-        fuselageLength = 40.0f;
-        height = 12.0f;
+        wingspan = STANDARD_WINGSPAN;
+        fuselageLength = STANDARD_FUSELAGE_LENGTH;
+        height = STANDARD_HEIGHT;
         pilotEyeX = -0.5f;
         pilotEyeY = 2.5f;
         pilotEyeZ = -15.0f;
@@ -123,9 +134,7 @@ struct AircraftDimensions {
     
     // Get a scale factor relative to a "standard" medium aircraft
     float getScaleFactor() const {
-        // Use wingspan as primary scaling reference
-        constexpr float standardWingspan = 35.0f;
-        return wingspan / standardWingspan;
+        return wingspan / STANDARD_WINGSPAN;
     }
 };
 
@@ -189,9 +198,9 @@ static XPLMDataRef g_drPilotZ = nullptr;
 static XPLMDataRef g_drViewType = nullptr;
 
 // Aircraft dimension datarefs (read from .acf file by X-Plane)
-static XPLMDataRef g_drAcfWingSpan = nullptr;      // sim/aircraft/view/acf_Vso - We use wingspan from parts
-static XPLMDataRef g_drAcfMinZ = nullptr;          // Minimum Z coordinate (tail)
-static XPLMDataRef g_drAcfMaxZ = nullptr;          // Maximum Z coordinate (nose)
+static XPLMDataRef g_drAcfWingSpan = nullptr;      // Wing span dataref (various sources tried)
+static XPLMDataRef g_drAcfCgZFwd = nullptr;        // CG forward limit Z (approximates nose position)
+static XPLMDataRef g_drAcfCgZAft = nullptr;        // CG aft limit Z (approximates tail position)
 static XPLMDataRef g_drAcfMinY = nullptr;          // Minimum Y coordinate (bottom, e.g., gear)
 static XPLMDataRef g_drAcfMaxY = nullptr;          // Maximum Y coordinate (top, e.g., tail)
 static XPLMDataRef g_drAcfPeX = nullptr;           // Pilot eye X position
@@ -834,20 +843,37 @@ static void ReadAircraftDimensions() {
     if (g_drAcfPeY) g_aircraftDims.pilotEyeY = XPLMGetDataf(g_drAcfPeY);
     if (g_drAcfPeZ) g_aircraftDims.pilotEyeZ = XPLMGetDataf(g_drAcfPeZ);
     
-    // Read aircraft bounding box coordinates
-    float minZ = 0.0f, maxZ = 0.0f, minY = 0.0f, maxY = 0.0f;
-    if (g_drAcfMinZ) minZ = XPLMGetDataf(g_drAcfMinZ);
-    if (g_drAcfMaxZ) maxZ = XPLMGetDataf(g_drAcfMaxZ);
+    // Read CG limits to estimate fuselage length
+    // The CG forward and aft limits give us a rough indication of aircraft length
+    float cgZFwd = 0.0f, cgZAft = 0.0f;
+    if (g_drAcfCgZFwd) cgZFwd = XPLMGetDataf(g_drAcfCgZFwd);
+    if (g_drAcfCgZAft) cgZAft = XPLMGetDataf(g_drAcfCgZAft);
+    
+    // Calculate fuselage length from CG range (multiply to estimate full length)
+    // The CG range is typically 20-30% of fuselage length, so we multiply by ~4
+    if (cgZFwd != 0.0f || cgZAft != 0.0f) {
+        float cgRange = std::abs(cgZAft - cgZFwd);
+        if (cgRange > 0.5f) {  // Valid CG range
+            g_aircraftDims.fuselageLength = cgRange * 4.0f;  // Estimate full fuselage length
+        }
+    }
+    
+    // Alternative: Use pilot eye Z position to estimate aircraft size
+    // Pilot is typically 20-40% from nose, so multiply pilotEyeZ accordingly
+    if (g_aircraftDims.pilotEyeZ != 0.0f && g_aircraftDims.fuselageLength < MIN_FUSELAGE_LENGTH + 1.0f) {
+        g_aircraftDims.fuselageLength = std::abs(g_aircraftDims.pilotEyeZ) * 2.5f;
+    }
+    
+    // Read height from Y datarefs if available
+    float minY = 0.0f, maxY = 0.0f;
     if (g_drAcfMinY) minY = XPLMGetDataf(g_drAcfMinY);
     if (g_drAcfMaxY) maxY = XPLMGetDataf(g_drAcfMaxY);
     
-    // Calculate dimensions from bounding box
-    // Z axis in X-Plane is longitudinal (nose is negative, tail is positive)
-    if (minZ != 0.0f || maxZ != 0.0f) {
-        g_aircraftDims.fuselageLength = std::abs(maxZ - minZ);
-    }
     if (minY != 0.0f || maxY != 0.0f) {
         g_aircraftDims.height = std::abs(maxY - minY);
+    } else if (g_aircraftDims.pilotEyeY > 0.0f) {
+        // Estimate height from pilot eye Y (pilot is typically at 60-80% of height)
+        g_aircraftDims.height = g_aircraftDims.pilotEyeY * 1.5f + 2.0f;  // Add ground clearance
     }
     
     // Read wingspan if available
@@ -858,13 +884,13 @@ static void ReadAircraftDimensions() {
         }
     }
     
-    // Validate and constrain dimensions to reasonable values
-    if (g_aircraftDims.wingspan < 5.0f) g_aircraftDims.wingspan = 35.0f;  // Default for invalid
-    if (g_aircraftDims.wingspan > 100.0f) g_aircraftDims.wingspan = 100.0f;  // Cap for very large aircraft
-    if (g_aircraftDims.fuselageLength < 5.0f) g_aircraftDims.fuselageLength = 40.0f;
-    if (g_aircraftDims.fuselageLength > 100.0f) g_aircraftDims.fuselageLength = 100.0f;
-    if (g_aircraftDims.height < 2.0f) g_aircraftDims.height = 12.0f;
-    if (g_aircraftDims.height > 30.0f) g_aircraftDims.height = 30.0f;
+    // Validate and constrain dimensions to reasonable values using named constants
+    if (g_aircraftDims.wingspan < MIN_WINGSPAN) g_aircraftDims.wingspan = STANDARD_WINGSPAN;
+    if (g_aircraftDims.wingspan > MAX_WINGSPAN) g_aircraftDims.wingspan = MAX_WINGSPAN;
+    if (g_aircraftDims.fuselageLength < MIN_FUSELAGE_LENGTH) g_aircraftDims.fuselageLength = STANDARD_FUSELAGE_LENGTH;
+    if (g_aircraftDims.fuselageLength > MAX_FUSELAGE_LENGTH) g_aircraftDims.fuselageLength = MAX_FUSELAGE_LENGTH;
+    if (g_aircraftDims.height < MIN_HEIGHT) g_aircraftDims.height = STANDARD_HEIGHT;
+    if (g_aircraftDims.height > MAX_HEIGHT) g_aircraftDims.height = MAX_HEIGHT;
     
     char msg[256];
     snprintf(msg, sizeof(msg), "MovieCamera: Aircraft dims - Wingspan: %.1fm, Length: %.1fm, Height: %.1fm, PilotEye: (%.1f, %.1f, %.1f)\n",
@@ -1899,20 +1925,25 @@ PLUGIN_API int XPluginStart(char* outName, char* outSig, char* outDesc) {
     g_drViewType = XPLMFindDataRef("sim/graphics/view/view_type");
     
     // Find aircraft dimension datarefs (loaded from .acf file by X-Plane)
-    g_drAcfWingSpan = XPLMFindDataRef("sim/aircraft/view/acf_Vso");  // Fallback, we'll use parts for better data
-    g_drAcfMinZ = XPLMFindDataRef("sim/aircraft/view/acf_tailnum_z");  // Tail number Z position (approximates tail)
-    g_drAcfMaxZ = XPLMFindDataRef("sim/aircraft/view/acf_livery_z");   // Livery Z position (approximates nose)
+    // Try to find proper aircraft geometry datarefs first
+    g_drAcfWingSpan = XPLMFindDataRef("sim/aircraft/parts/acf_wing_span");
+    if (!g_drAcfWingSpan) {
+        // Fallback datarefs if preferred ones not available
+        g_drAcfWingSpan = XPLMFindDataRef("sim/aircraft/view/acf_RSC_LET_rat");  // Another potential source
+    }
+    
+    // CG limits provide good approximation of aircraft length
+    g_drAcfCgZFwd = XPLMFindDataRef("sim/aircraft/overflow/acf_cgZ_fwd");  // Forward CG limit
+    g_drAcfCgZAft = XPLMFindDataRef("sim/aircraft/overflow/acf_cgZ_aft");  // Aft CG limit
+    
+    // Height estimation from various sources
     g_drAcfMinY = XPLMFindDataRef("sim/aircraft/parts/acf_gear_ynodef");  // Gear Y position for ground clearance
-    g_drAcfMaxY = XPLMFindDataRef("sim/aircraft/view/acf_tailnum_y");    // Tail number Y (approximates height)
+    g_drAcfMaxY = XPLMFindDataRef("sim/aircraft/view/acf_peY");  // Use pilot eye Y as height reference
+    
+    // Pilot eye position - most reliable datarefs
     g_drAcfPeX = XPLMFindDataRef("sim/aircraft/view/acf_peX");   // Pilot eye X
     g_drAcfPeY = XPLMFindDataRef("sim/aircraft/view/acf_peY");   // Pilot eye Y
     g_drAcfPeZ = XPLMFindDataRef("sim/aircraft/view/acf_peZ");   // Pilot eye Z
-    
-    // Also try to find wing span from parts data
-    XPLMDataRef drWingSpan = XPLMFindDataRef("sim/aircraft/parts/acf_wing_span");
-    if (drWingSpan) {
-        g_drAcfWingSpan = drWingSpan;
-    }
     
     // Initialize with default camera shots first
     InitializeCameraShots();
