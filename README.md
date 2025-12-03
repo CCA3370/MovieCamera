@@ -19,6 +19,17 @@ Access the plugin from `Plugins > MovieCamera`:
    - Aircraft is on ground and stationary, OR
    - Aircraft is above the configured altitude AND mouse has been idle for the configured delay
 
+### Intelligent Dynamic Camera System
+
+The plugin **automatically reads aircraft dimensions** from X-Plane's datarefs (which are loaded from the .acf file) and **intelligently calculates camera positions** based on the aircraft's actual size:
+
+- **Wingspan-based scaling**: External camera distances are calculated relative to the aircraft's wingspan
+- **Fuselage length awareness**: Front/rear camera shots are positioned based on actual fuselage length
+- **Height-adaptive positions**: Vertical camera placements adjust to aircraft height
+- **Pilot eye position**: Cockpit views are scaled based on the actual cockpit size
+
+This means camera shots work correctly for any aircraft - from small GA planes to large airliners - without manual configuration.
+
 ### Cinematic Camera System
 
 The plugin provides smooth transitions between various camera angles with **continuous multi-axis drift motion** using sinusoidal easing for a cinematic feel:

@@ -99,6 +99,60 @@ struct CustomCameraPath {
     }
 };
 
+// Aircraft dimension constants
+constexpr float STANDARD_WINGSPAN = 35.0f;         // Standard wingspan for scaling (meters, similar to B737/A320)
+constexpr float STANDARD_FUSELAGE_LENGTH = 40.0f;  // Standard fuselage length (meters)
+constexpr float STANDARD_HEIGHT = 12.0f;           // Standard aircraft height (meters)
+constexpr float MIN_WINGSPAN = 5.0f;               // Minimum valid wingspan (meters)
+constexpr float MAX_WINGSPAN = 100.0f;             // Maximum valid wingspan (meters)
+constexpr float MIN_FUSELAGE_LENGTH = 5.0f;        // Minimum valid fuselage length (meters)
+constexpr float MAX_FUSELAGE_LENGTH = 100.0f;      // Maximum valid fuselage length (meters)
+constexpr float MIN_HEIGHT = 2.0f;                 // Minimum valid aircraft height (meters)
+constexpr float MAX_HEIGHT = 30.0f;                // Maximum valid aircraft height (meters)
+
+// Estimation multipliers for deriving aircraft dimensions from limited data
+// CG range is typically 20-30% of total fuselage length
+constexpr float CG_TO_FUSELAGE_MULTIPLIER = 4.0f;
+// Pilot is typically located 30-40% from nose, so multiply Z position to estimate length
+constexpr float PILOT_Z_TO_FUSELAGE_MULTIPLIER = 2.5f;
+// Pilot eye is typically at 60-80% of aircraft height
+constexpr float PILOT_Y_TO_HEIGHT_MULTIPLIER = 1.5f;
+// Ground clearance estimation (meters)
+constexpr float ESTIMATED_GROUND_CLEARANCE = 2.0f;
+// Minimum valid CG range to use for estimation (meters)
+constexpr float MIN_VALID_CG_RANGE = 0.5f;
+
+/**
+ * Aircraft dimensions structure
+ * Stores dimensions read from X-Plane datarefs to calculate dynamic camera positions
+ */
+struct AircraftDimensions {
+    float wingspan;          // Wing span in meters
+    float fuselageLength;    // Approximate fuselage length in meters
+    float height;            // Aircraft height in meters (e.g., from ground to top of tail)
+    float pilotEyeX;         // Pilot eye X position (lateral offset from centerline)
+    float pilotEyeY;         // Pilot eye Y position (vertical offset from CG)
+    float pilotEyeZ;         // Pilot eye Z position (longitudinal offset from CG)
+    
+    // Default values for a medium-sized aircraft (similar to B737/A320)
+    void setDefaults() {
+        wingspan = STANDARD_WINGSPAN;
+        fuselageLength = STANDARD_FUSELAGE_LENGTH;
+        height = STANDARD_HEIGHT;
+        pilotEyeX = -0.5f;
+        pilotEyeY = 2.5f;
+        pilotEyeZ = -15.0f;
+    }
+    
+    // Get a scale factor relative to a "standard" medium aircraft
+    float getScaleFactor() const {
+        return wingspan / STANDARD_WINGSPAN;
+    }
+};
+
+// Global aircraft dimensions
+static AircraftDimensions g_aircraftDims;
+
 // Plugin Global State
 static PluginMode g_pluginMode = PluginMode::Off;
 static bool g_functionActive = false;    // Is the camera control actually running
@@ -155,6 +209,16 @@ static XPLMDataRef g_drPilotY = nullptr;
 static XPLMDataRef g_drPilotZ = nullptr;
 static XPLMDataRef g_drViewType = nullptr;
 
+// Aircraft dimension datarefs (read from .acf file by X-Plane)
+static XPLMDataRef g_drAcfWingSpan = nullptr;      // Wing span dataref (various sources tried)
+static XPLMDataRef g_drAcfCgZFwd = nullptr;        // CG forward limit Z (approximates nose position)
+static XPLMDataRef g_drAcfCgZAft = nullptr;        // CG aft limit Z (approximates tail position)
+static XPLMDataRef g_drAcfMinY = nullptr;          // Minimum Y coordinate (bottom, e.g., gear)
+static XPLMDataRef g_drAcfMaxY = nullptr;          // Maximum Y coordinate (top, e.g., tail)
+static XPLMDataRef g_drAcfPeX = nullptr;           // Pilot eye X position
+static XPLMDataRef g_drAcfPeY = nullptr;           // Pilot eye Y position  
+static XPLMDataRef g_drAcfPeZ = nullptr;           // Pilot eye Z position
+
 // Flight loop callback
 static XPLMFlightLoopID g_flightLoopId = nullptr;
 
@@ -194,6 +258,8 @@ static std::unique_ptr<SettingsWindow> g_settingsWindow;
 
 // Function declarations
 static void InitializeCameraShots();
+static void ReadAircraftDimensions();
+static void GenerateDynamicCameraShots();
 static void UpdateMenuState();
 static float FlightLoopCallback(float inElapsedSinceLastCall, float inElapsedTimeSinceLastFlightLoop, int inCounter, void* inRefcon);
 static int CameraControlCallback(XPLMCameraPosition_t* outCameraPosition, int inIsLosingControl, void* inRefcon);
@@ -774,6 +840,283 @@ static void InitializeCameraShots() {
     // Belly view - looking up at aircraft from below
     g_externalShots.push_back({CameraType::External, 8.0f, -18.0f, 0.0f, -35.0f, -5.0f, 0.0f, 0.9f, 8.0f, "Belly View",
                                -0.05f, 0.08f, 0.0f, 0.3f, 0.4f, 0.0f, 0.0f});
+}
+
+/**
+ * Read aircraft dimensions from X-Plane datarefs
+ * This reads data that X-Plane has loaded from the .acf file
+ */
+static void ReadAircraftDimensions() {
+    // Set defaults first
+    g_aircraftDims.setDefaults();
+    
+    // Read pilot eye position (relative to aircraft CG)
+    if (g_drAcfPeX) g_aircraftDims.pilotEyeX = XPLMGetDataf(g_drAcfPeX);
+    if (g_drAcfPeY) g_aircraftDims.pilotEyeY = XPLMGetDataf(g_drAcfPeY);
+    if (g_drAcfPeZ) g_aircraftDims.pilotEyeZ = XPLMGetDataf(g_drAcfPeZ);
+    
+    // Read CG limits to estimate fuselage length
+    // The CG forward and aft limits give us a rough indication of aircraft length
+    float cgZFwd = 0.0f, cgZAft = 0.0f;
+    if (g_drAcfCgZFwd) cgZFwd = XPLMGetDataf(g_drAcfCgZFwd);
+    if (g_drAcfCgZAft) cgZAft = XPLMGetDataf(g_drAcfCgZAft);
+    
+    // Calculate fuselage length from CG range
+    if (cgZFwd != 0.0f || cgZAft != 0.0f) {
+        float cgRange = std::abs(cgZAft - cgZFwd);
+        if (cgRange > MIN_VALID_CG_RANGE) {
+            g_aircraftDims.fuselageLength = cgRange * CG_TO_FUSELAGE_MULTIPLIER;
+        }
+    }
+    
+    // Alternative: Use pilot eye Z position to estimate aircraft size
+    // This is used if CG-based estimation didn't provide a valid result
+    if (g_aircraftDims.pilotEyeZ != 0.0f && g_aircraftDims.fuselageLength < MIN_FUSELAGE_LENGTH + 1.0f) {
+        g_aircraftDims.fuselageLength = std::abs(g_aircraftDims.pilotEyeZ) * PILOT_Z_TO_FUSELAGE_MULTIPLIER;
+    }
+    
+    // Read height from gear Y position if available, otherwise use pilot eye
+    float minY = 0.0f;
+    if (g_drAcfMinY) minY = XPLMGetDataf(g_drAcfMinY);
+    
+    if (minY != 0.0f && g_aircraftDims.pilotEyeY > 0.0f) {
+        // Calculate height from gear to pilot eye position, plus estimated distance above pilot
+        g_aircraftDims.height = g_aircraftDims.pilotEyeY - minY + ESTIMATED_GROUND_CLEARANCE;
+    } else if (g_aircraftDims.pilotEyeY > 0.0f) {
+        // Estimate height from pilot eye Y position plus ground clearance
+        g_aircraftDims.height = g_aircraftDims.pilotEyeY * PILOT_Y_TO_HEIGHT_MULTIPLIER + ESTIMATED_GROUND_CLEARANCE;
+    }
+    
+    // Read wingspan if available
+    if (g_drAcfWingSpan) {
+        float span = XPLMGetDataf(g_drAcfWingSpan);
+        if (span > 0.0f) {
+            g_aircraftDims.wingspan = span;
+        }
+    }
+    
+    // Validate and constrain dimensions to reasonable values using named constants
+    if (g_aircraftDims.wingspan < MIN_WINGSPAN) g_aircraftDims.wingspan = STANDARD_WINGSPAN;
+    if (g_aircraftDims.wingspan > MAX_WINGSPAN) g_aircraftDims.wingspan = MAX_WINGSPAN;
+    if (g_aircraftDims.fuselageLength < MIN_FUSELAGE_LENGTH) g_aircraftDims.fuselageLength = STANDARD_FUSELAGE_LENGTH;
+    if (g_aircraftDims.fuselageLength > MAX_FUSELAGE_LENGTH) g_aircraftDims.fuselageLength = MAX_FUSELAGE_LENGTH;
+    if (g_aircraftDims.height < MIN_HEIGHT) g_aircraftDims.height = STANDARD_HEIGHT;
+    if (g_aircraftDims.height > MAX_HEIGHT) g_aircraftDims.height = MAX_HEIGHT;
+    
+    char msg[256];
+    snprintf(msg, sizeof(msg), "MovieCamera: Aircraft dims - Wingspan: %.1fm, Length: %.1fm, Height: %.1fm, PilotEye: (%.1f, %.1f, %.1f)\n",
+             g_aircraftDims.wingspan, g_aircraftDims.fuselageLength, g_aircraftDims.height,
+             g_aircraftDims.pilotEyeX, g_aircraftDims.pilotEyeY, g_aircraftDims.pilotEyeZ);
+    XPLMDebugString(msg);
+}
+
+/**
+ * Generate dynamic camera shots based on aircraft dimensions
+ * This calculates camera positions relative to the aircraft's actual size
+ */
+static void GenerateDynamicCameraShots() {
+    // Get scale factor based on aircraft size
+    float scale = g_aircraftDims.getScaleFactor();
+    float wingspan = g_aircraftDims.wingspan;
+    float fuselageLen = g_aircraftDims.fuselageLength;
+    float height = g_aircraftDims.height;
+    
+    // Clear existing shots
+    g_cockpitShots.clear();
+    g_externalShots.clear();
+    
+    // =====================================================
+    // COCKPIT SHOTS - These are relative to pilot eye position
+    // Scale cockpit movements slightly for larger cockpits
+    // =====================================================
+    float cockpitScale = std::sqrt(scale);  // Use sqrt for subtler scaling in cockpit
+    
+    // Center panel view - slow zoom in with slight drift
+    g_cockpitShots.push_back({CameraType::Cockpit, 0.0f, 0.15f * cockpitScale, 0.4f * cockpitScale,
+                              -8.0f, 0.0f, 0.0f, 1.0f, 8.0f, "Center Panel",
+                              0.0f, 0.01f, 0.02f, 0.2f, 0.0f, 0.0f, 0.03f});
+    
+    // Left panel (throttle/navigation) - gentle pan right with zoom
+    g_cockpitShots.push_back({CameraType::Cockpit, -0.25f * cockpitScale, 0.1f * cockpitScale, 0.3f * cockpitScale,
+                              -12.0f, -25.0f, 0.0f, 1.2f, 7.0f, "Left Panel",
+                              0.01f, 0.0f, 0.01f, 0.15f, 1.0f, 0.0f, 0.025f});
+    
+    // Right panel (radios/autopilot) - gentle pan left with zoom
+    g_cockpitShots.push_back({CameraType::Cockpit, 0.25f * cockpitScale, 0.1f * cockpitScale, 0.3f * cockpitScale,
+                              -12.0f, 25.0f, 0.0f, 1.2f, 7.0f, "Right Panel",
+                              -0.01f, 0.0f, 0.01f, 0.15f, -1.0f, 0.0f, 0.025f});
+    
+    // Overhead panel view - slow tilt down
+    g_cockpitShots.push_back({CameraType::Cockpit, 0.0f, 0.35f * cockpitScale, 0.15f * cockpitScale,
+                              -55.0f, 0.0f, 0.0f, 1.1f, 6.0f, "Overhead Panel",
+                              0.0f, -0.01f, 0.01f, 1.5f, 0.0f, 0.0f, 0.02f});
+    
+    // PFD closeup - slow zoom with subtle drift
+    g_cockpitShots.push_back({CameraType::Cockpit, -0.12f * cockpitScale, 0.05f * cockpitScale, 0.45f * cockpitScale,
+                              -3.0f, -8.0f, 0.0f, 1.6f, 8.0f, "PFD View",
+                              0.005f, 0.005f, 0.015f, 0.1f, 0.3f, 0.0f, 0.04f});
+    
+    // ND/MFD view - slow zoom with subtle drift  
+    g_cockpitShots.push_back({CameraType::Cockpit, 0.12f * cockpitScale, 0.05f * cockpitScale, 0.45f * cockpitScale,
+                              -3.0f, 8.0f, 0.0f, 1.6f, 8.0f, "ND/MFD View",
+                              -0.005f, 0.005f, 0.015f, 0.1f, -0.3f, 0.0f, 0.04f});
+    
+    // Pilot's eye view looking out - subtle look around
+    g_cockpitShots.push_back({CameraType::Cockpit, -0.1f * cockpitScale, 0.25f * cockpitScale, -0.1f * cockpitScale,
+                              3.0f, 5.0f, 0.0f, 0.9f, 10.0f, "Pilot View",
+                              0.005f, 0.0f, 0.0f, 0.0f, 0.8f, 0.0f, 0.0f});
+    
+    // Co-pilot perspective - looking at captain's side
+    g_cockpitShots.push_back({CameraType::Cockpit, 0.35f * cockpitScale, 0.2f * cockpitScale, 0.0f,
+                              0.0f, -20.0f, 0.0f, 0.95f, 8.0f, "Copilot View",
+                              -0.01f, 0.0f, 0.0f, 0.0f, 0.5f, 0.0f, 0.01f});
+    
+    // Looking out left window - slow pan
+    g_cockpitShots.push_back({CameraType::Cockpit, -0.35f * cockpitScale, 0.15f * cockpitScale, 0.0f,
+                              2.0f, -75.0f, 0.0f, 0.85f, 9.0f, "Left Window",
+                              0.0f, 0.01f, 0.0f, -0.3f, 2.0f, 0.0f, 0.0f});
+    
+    // Looking out right window - slow pan
+    g_cockpitShots.push_back({CameraType::Cockpit, 0.35f * cockpitScale, 0.15f * cockpitScale, 0.0f,
+                              2.0f, 75.0f, 0.0f, 0.85f, 9.0f, "Right Window",
+                              0.0f, 0.01f, 0.0f, -0.3f, -2.0f, 0.0f, 0.0f});
+    
+    // Pedestal/center console view
+    g_cockpitShots.push_back({CameraType::Cockpit, 0.0f, 0.0f, 0.35f * cockpitScale,
+                              -35.0f, 0.0f, 0.0f, 1.4f, 6.0f, "Pedestal View",
+                              0.0f, 0.01f, 0.01f, 0.5f, 0.0f, 0.0f, 0.03f});
+    
+    // =====================================================
+    // EXTERNAL SHOTS - Scaled based on aircraft dimensions
+    // These need to be far enough from aircraft to avoid clipping
+    // =====================================================
+    
+    // Calculate base distances based on aircraft size
+    float frontDist = fuselageLen * 1.2f;      // Distance in front of aircraft
+    float rearDist = fuselageLen * 1.5f;       // Distance behind aircraft
+    float sideDist = wingspan * 1.3f;          // Distance to side
+    float highDist = height * 4.0f;            // High altitude distance
+    float closeDist = wingspan * 0.6f;         // Close-up distance
+    
+    // Drift amounts scale with aircraft size
+    float driftScale = scale * 0.5f + 0.5f;    // 0.5 to 1.5x based on size
+    
+    // Front hero shot - positioned further out and slightly offset
+    g_externalShots.push_back({CameraType::External,
+                               5.0f * scale, height * 0.7f, -frontDist,
+                               10.0f, 175.0f, 0.0f, 0.85f, 10.0f, "Front Hero",
+                               -0.1f * driftScale, 0.12f * driftScale, 0.25f * driftScale,
+                               -0.25f, 0.3f, 0.0f, 0.01f});
+    
+    // Rear chase - elevated and further back, offset to side
+    g_externalShots.push_back({CameraType::External,
+                               -8.0f * scale, height * 1.0f, rearDist,
+                               15.0f, 8.0f, 0.0f, 0.8f, 10.0f, "Rear Chase",
+                               0.15f * driftScale, 0.08f * driftScale, -0.18f * driftScale,
+                               -0.15f, -0.4f, 0.0f, 0.0f});
+    
+    // Left flyby - further out to side, more dramatic sweep
+    g_externalShots.push_back({CameraType::External,
+                               -sideDist, height * 0.4f, fuselageLen * 0.4f,
+                               5.0f, 82.0f, 2.0f, 0.85f, 12.0f, "Left Flyby",
+                               0.5f * driftScale, 0.1f * driftScale, -0.6f * driftScale,
+                               0.0f, 1.0f, -0.1f, 0.0f});
+    
+    // Right flyby - further out to side, more dramatic sweep
+    g_externalShots.push_back({CameraType::External,
+                               sideDist, height * 0.4f, fuselageLen * 0.4f,
+                               5.0f, -82.0f, -2.0f, 0.85f, 12.0f, "Right Flyby",
+                               -0.5f * driftScale, 0.1f * driftScale, -0.6f * driftScale,
+                               0.0f, -1.0f, 0.1f, 0.0f});
+    
+    // High orbit - high above and further back for wide view
+    g_externalShots.push_back({CameraType::External,
+                               wingspan * 0.4f, highDist, fuselageLen * 0.8f,
+                               62.0f, -15.0f, 0.0f, 0.75f, 15.0f, "High Orbit",
+                               -0.3f * driftScale, 0.03f * driftScale, 0.0f,
+                               0.0f, 2.0f, 0.0f, 0.0f});
+    
+    // Low angle front - below and forward, offset to avoid fuselage
+    g_externalShots.push_back({CameraType::External,
+                               wingspan * 0.3f, -height * 1.0f, -fuselageLen * 0.9f,
+                               -22.0f, 170.0f, 3.0f, 0.9f, 8.0f, "Low Angle Front",
+                               -0.1f * driftScale, 0.15f * driftScale, 0.2f * driftScale,
+                               0.4f, 0.5f, -0.2f, 0.0f});
+    
+    // Quarter front left - wide angle approach shot
+    g_externalShots.push_back({CameraType::External,
+                               -sideDist * 0.8f, height * 1.0f, -frontDist * 0.8f,
+                               14.0f, 135.0f, -1.0f, 0.82f, 10.0f, "Quarter FL",
+                               0.25f * driftScale, 0.06f * driftScale, 0.3f * driftScale,
+                               -0.12f, -0.8f, 0.05f, 0.0f});
+    
+    // Quarter front right - wide angle approach shot
+    g_externalShots.push_back({CameraType::External,
+                               sideDist * 0.8f, height * 1.0f, -frontDist * 0.8f,
+                               14.0f, -135.0f, 1.0f, 0.82f, 10.0f, "Quarter FR",
+                               -0.25f * driftScale, 0.06f * driftScale, 0.3f * driftScale,
+                               -0.12f, 0.8f, -0.05f, 0.0f});
+    
+    // Quarter rear left - elevated departure shot
+    g_externalShots.push_back({CameraType::External,
+                               -sideDist * 0.7f, height * 1.5f, rearDist * 0.8f,
+                               20.0f, 45.0f, 2.0f, 0.8f, 10.0f, "Quarter RL",
+                               0.2f * driftScale, 0.04f * driftScale, -0.2f * driftScale,
+                               -0.18f, -0.6f, -0.1f, 0.0f});
+    
+    // Quarter rear right - elevated departure shot  
+    g_externalShots.push_back({CameraType::External,
+                               sideDist * 0.7f, height * 1.5f, rearDist * 0.8f,
+                               20.0f, -45.0f, -2.0f, 0.8f, 10.0f, "Quarter RR",
+                               -0.2f * driftScale, 0.04f * driftScale, -0.2f * driftScale,
+                               -0.18f, 0.6f, 0.1f, 0.0f});
+    
+    // Wing tip left - close wing view with offset
+    g_externalShots.push_back({CameraType::External,
+                               -closeDist, height * 0.4f, fuselageLen * 0.2f,
+                               10.0f, 60.0f, -3.0f, 1.0f, 8.0f, "Wing Left",
+                               0.1f * driftScale, 0.04f * driftScale, -0.12f * driftScale,
+                               0.0f, 0.6f, 0.15f, 0.0f});
+    
+    // Wing tip right - close wing view with offset
+    g_externalShots.push_back({CameraType::External,
+                               closeDist, height * 0.4f, fuselageLen * 0.2f,
+                               10.0f, -60.0f, 3.0f, 1.0f, 8.0f, "Wing Right",
+                               -0.1f * driftScale, 0.04f * driftScale, -0.12f * driftScale,
+                               0.0f, -0.6f, -0.15f, 0.0f});
+    
+    // Engine close-up left - positioned to see engine from outside
+    g_externalShots.push_back({CameraType::External,
+                               -wingspan * 0.4f, height * 0.15f, -fuselageLen * 0.1f,
+                               8.0f, 75.0f, 0.0f, 1.2f, 7.0f, "Engine L",
+                               0.06f * driftScale, 0.03f * driftScale, -0.1f * driftScale,
+                               0.0f, 0.4f, 0.0f, 0.0f});
+    
+    // Engine close-up right - positioned to see engine from outside
+    g_externalShots.push_back({CameraType::External,
+                               wingspan * 0.4f, height * 0.15f, -fuselageLen * 0.1f,
+                               8.0f, -75.0f, 0.0f, 1.2f, 7.0f, "Engine R",
+                               -0.06f * driftScale, 0.03f * driftScale, -0.1f * driftScale,
+                               0.0f, -0.4f, 0.0f, 0.0f});
+    
+    // Tail view - looking at tail from behind and above
+    g_externalShots.push_back({CameraType::External,
+                               -wingspan * 0.25f, height * 1.2f, rearDist * 1.1f,
+                               28.0f, 10.0f, 0.0f, 0.85f, 9.0f, "Tail View",
+                               0.1f * driftScale, 0.06f * driftScale, -0.12f * driftScale,
+                               -0.25f, -0.6f, 0.0f, 0.0f});
+    
+    // Belly view - looking up at aircraft from below
+    g_externalShots.push_back({CameraType::External,
+                               wingspan * 0.2f, -height * 1.5f, 0.0f,
+                               -35.0f, -5.0f, 0.0f, 0.9f, 8.0f, "Belly View",
+                               -0.05f * driftScale, 0.08f * driftScale, 0.0f,
+                               0.3f, 0.4f, 0.0f, 0.0f});
+    
+    char msg[128];
+    snprintf(msg, sizeof(msg), "MovieCamera: Generated %zu cockpit and %zu external shots for aircraft (scale: %.2f)\n",
+             g_cockpitShots.size(), g_externalShots.size(), scale);
+    XPLMDebugString(msg);
 }
 
 /**
@@ -1592,7 +1935,26 @@ PLUGIN_API int XPluginStart(char* outName, char* outSig, char* outDesc) {
     g_drPilotZ = XPLMFindDataRef("sim/graphics/view/pilots_head_z");
     g_drViewType = XPLMFindDataRef("sim/graphics/view/view_type");
     
-    // Initialize camera shots
+    // Find aircraft dimension datarefs (loaded from .acf file by X-Plane)
+    // Primary source: direct aircraft geometry datarefs
+    g_drAcfWingSpan = XPLMFindDataRef("sim/aircraft/parts/acf_wing_span");
+    // Note: No reliable fallback for wingspan - will use pilot eye based estimation if unavailable
+    
+    // CG limits provide good approximation of aircraft length
+    g_drAcfCgZFwd = XPLMFindDataRef("sim/aircraft/overflow/acf_cgZ_fwd");  // Forward CG limit
+    g_drAcfCgZAft = XPLMFindDataRef("sim/aircraft/overflow/acf_cgZ_aft");  // Aft CG limit
+    
+    // Height estimation sources
+    g_drAcfMinY = XPLMFindDataRef("sim/aircraft/parts/acf_gear_ynodef");  // Gear Y position for ground clearance
+    // Note: g_drAcfMaxY not used directly; height estimated from pilot eye position in ReadAircraftDimensions()
+    g_drAcfMaxY = nullptr;
+    
+    // Pilot eye position - most reliable datarefs for aircraft size estimation
+    g_drAcfPeX = XPLMFindDataRef("sim/aircraft/view/acf_peX");   // Pilot eye X (lateral offset)
+    g_drAcfPeY = XPLMFindDataRef("sim/aircraft/view/acf_peY");   // Pilot eye Y (height from CG)
+    g_drAcfPeZ = XPLMFindDataRef("sim/aircraft/view/acf_peZ");   // Pilot eye Z (longitudinal from CG)
+    
+    // Initialize with default camera shots first
     InitializeCameraShots();
     
     // Load custom camera paths
@@ -1657,6 +2019,10 @@ PLUGIN_API int XPluginEnable(void) {
     // Get initial mouse position
     XPLMGetMouseLocation(&g_lastMouseX, &g_lastMouseY);
     
+    // Read aircraft dimensions and generate dynamic camera shots
+    ReadAircraftDimensions();
+    GenerateDynamicCameraShots();
+    
     XPLMDebugString("MovieCamera: Plugin enabled\n");
     
     return 1;
@@ -1694,9 +2060,13 @@ PLUGIN_API void XPluginDisable(void) {
 PLUGIN_API void XPluginReceiveMessage(XPLMPluginID inFrom, int inMsg, void* inParam) {
     (void)inFrom;
     
-    // Handle plane loaded message to reset state
+    // Handle plane loaded message to reset state and recalculate camera shots
     if (inMsg == XPLM_MSG_PLANE_LOADED && inParam == nullptr) {
-        // User's plane loaded
+        // User's plane loaded - read new aircraft dimensions and regenerate camera shots
         g_mouseIdleTime = 0.0f;
+        
+        XPLMDebugString("MovieCamera: User aircraft loaded, reading dimensions...\n");
+        ReadAircraftDimensions();
+        GenerateDynamicCameraShots();
     }
 }
