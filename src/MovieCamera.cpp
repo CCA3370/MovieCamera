@@ -930,11 +930,12 @@ static float CalculateMinVisibleDistance() {
 }
 
 /**
- * Calculate intelligent zoom based on aircraft size
+ * Calculate intelligent zoom based on aircraft size and camera distance
  * Larger aircraft need lower zoom (wider view) to stay in frame
  * Smaller aircraft need higher zoom (closer view) to be visible
+ * Farther cameras may need more zoom to keep aircraft visible
  */
-static float CalculateIntelligentZoom(float baseZoom, [[maybe_unused]] float cameraDistance) {
+static float CalculateIntelligentZoom(float baseZoom, float cameraDistance) {
     // Get the scaling factor for the aircraft
     float scale = g_aircraftDims.getScaleFactor();
     
@@ -942,8 +943,13 @@ static float CalculateIntelligentZoom(float baseZoom, [[maybe_unused]] float cam
     // For smaller aircraft (scale < 1), increase zoom to make aircraft more visible
     float zoomAdjustment = 1.0f / std::sqrt(scale);
     
-    // Combine adjustments
-    float adjustedZoom = baseZoom * zoomAdjustment * ZOOM_SCALE_FACTOR;
+    // Adjust zoom based on camera distance - farther cameras need more zoom
+    // Use wingspan as reference distance
+    float distanceFactor = cameraDistance / (g_aircraftDims.wingspan * 2.0f);
+    distanceFactor = std::clamp(distanceFactor, 0.7f, 1.5f);
+    
+    // Combine adjustments - farther distance increases zoom slightly
+    float adjustedZoom = baseZoom * zoomAdjustment * ZOOM_SCALE_FACTOR * distanceFactor;
     
     // Clamp to reasonable zoom range (0.5 = wide, 2.0 = telephoto)
     return std::clamp(adjustedZoom, 0.5f, 2.0f);
