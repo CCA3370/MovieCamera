@@ -58,7 +58,7 @@ The plugin provides smooth transitions between various camera angles with **cont
 - **Sinusoidal Drift Motion**: Camera drift uses smooth sine-wave based easing instead of linear motion, creating a floating, organic feel
 - **Multi-frequency oscillation**: Different camera axes use slightly different frequencies for natural-looking movement
 - **Cockpit Zoom Breathing**: In cockpit views, the focal length slowly changes to simulate aperture/depth-of-field effects
-- **Smooth Transitions**: Ease-in-out cubic transitions between shots
+- **Instant View Switching**: Camera switches between viewpoints instantly for a snappy, responsive feel
 
 ### Custom Camera Paths
 

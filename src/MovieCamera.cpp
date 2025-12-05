@@ -1522,7 +1522,8 @@ static void StartCameraControl() {
     g_targetPos.roll = firstShot.roll;
     g_targetPos.zoom = firstShot.zoom;
     
-    g_inTransition = true;
+    // Instant camera switch - no smooth transition
+    g_inTransition = false;
     g_transitionProgress = 0.0f;
     g_currentShotTime = firstShot.duration;
     
@@ -1814,7 +1815,8 @@ static float FlightLoopCallback(float inElapsedSinceLastCall, float inElapsedTim
                 g_targetPos.roll = nextShot.roll;
                 g_targetPos.zoom = nextShot.zoom;
                 
-                g_inTransition = true;
+                // Instant camera switch - no smooth transition
+                g_inTransition = false;
                 g_transitionProgress = 0.0f;
                 g_currentShotTime = nextShot.duration;
             }
