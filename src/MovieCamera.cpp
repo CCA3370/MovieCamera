@@ -7,6 +7,12 @@
  * Uses ImGui for the settings window (based on ImgWindow integration).
  */
 
+// Must be defined before any includes to prevent Windows min/max macros
+// from conflicting with std::min/std::max
+#if defined(_WIN32) || defined(WIN32) || defined(IBM)
+#define NOMINMAX
+#endif
+
 #include "XPLMDefs.h"
 #include "XPLMPlugin.h"
 #include "XPLMProcessing.h"
@@ -22,7 +28,6 @@
 
 // OpenGL for trajectory drawing
 #if IBM
-#define NOMINMAX  // Prevent Windows min/max macros from conflicting with std::min/std::max
 #include <windows.h>
 #include <GL/gl.h>
 #elif APL
