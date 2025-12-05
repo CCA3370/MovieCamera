@@ -122,6 +122,11 @@ constexpr float ESTIMATED_GROUND_CLEARANCE = 2.0f;
 // Minimum valid CG range to use for estimation (meters)
 constexpr float MIN_VALID_CG_RANGE = 0.5f;
 
+// Camera safety constants
+constexpr float MIN_CAMERA_HEIGHT_ABOVE_GROUND = 2.0f;   // Minimum camera height above ground (meters)
+constexpr float MIN_CAMERA_DISTANCE_FROM_AIRCRAFT = 5.0f; // Minimum distance to ensure aircraft is visible (meters)
+constexpr float ZOOM_SCALE_FACTOR = 0.7f;                 // Base zoom factor scaled by aircraft size
+
 /**
  * Aircraft dimensions structure
  * Stores dimensions read from X-Plane datarefs to calculate dynamic camera positions
@@ -911,6 +916,43 @@ static void ReadAircraftDimensions() {
 }
 
 /**
+ * Calculate the minimum camera distance required to keep the aircraft visible
+ * This ensures the camera is far enough to frame the aircraft properly
+ */
+static float CalculateMinVisibleDistance() {
+    // The larger the aircraft, the farther the camera needs to be
+    // Use the maximum dimension (wingspan or fuselage) as reference
+    float maxDimension = std::max(g_aircraftDims.wingspan, g_aircraftDims.fuselageLength);
+    // Camera should be at least 1.5x the max dimension away to ensure full visibility
+    return std::max(maxDimension * 1.5f, MIN_CAMERA_DISTANCE_FROM_AIRCRAFT);
+}
+
+/**
+ * Calculate intelligent zoom based on aircraft size
+ * Larger aircraft need lower zoom (wider view) to stay in frame
+ * Smaller aircraft need higher zoom (closer view) to be visible
+ */
+static float CalculateIntelligentZoom(float baseZoom, float cameraDistance) {
+    // Get the scaling factor for the aircraft
+    float scale = g_aircraftDims.getScaleFactor();
+    
+    // For larger aircraft (scale > 1), reduce zoom to fit in frame
+    // For smaller aircraft (scale < 1), increase zoom to make aircraft more visible
+    float zoomAdjustment = 1.0f / std::sqrt(scale);
+    
+    // Also consider camera distance - farther cameras may need more zoom
+    float distanceFactor = cameraDistance / (g_aircraftDims.wingspan * 2.0f);
+    distanceFactor = std::clamp(distanceFactor, 0.5f, 2.0f);
+    (void)distanceFactor; // Currently unused, reserved for future enhancement
+    
+    // Combine adjustments
+    float adjustedZoom = baseZoom * zoomAdjustment * ZOOM_SCALE_FACTOR;
+    
+    // Clamp to reasonable zoom range (0.5 = wide, 2.0 = telephoto)
+    return std::clamp(adjustedZoom, 0.5f, 2.0f);
+}
+
+/**
  * Generate dynamic camera shots based on aircraft dimensions
  * This calculates camera positions relative to the aircraft's actual size
  */
@@ -992,124 +1034,134 @@ static void GenerateDynamicCameraShots() {
     // =====================================================
     
     // Calculate base distances based on aircraft size
-    float frontDist = fuselageLen * 1.2f;      // Distance in front of aircraft
-    float rearDist = fuselageLen * 1.5f;       // Distance behind aircraft
-    float sideDist = wingspan * 1.3f;          // Distance to side
-    float highDist = height * 4.0f;            // High altitude distance
-    float closeDist = wingspan * 0.6f;         // Close-up distance
+    // Ensure minimum distance for aircraft visibility
+    float minVisibleDist = CalculateMinVisibleDistance();
+    float frontDist = std::max(fuselageLen * 1.2f, minVisibleDist);      // Distance in front of aircraft
+    float rearDist = std::max(fuselageLen * 1.5f, minVisibleDist);       // Distance behind aircraft
+    float sideDist = std::max(wingspan * 1.3f, minVisibleDist);          // Distance to side
+    float highDist = std::max(height * 4.0f, minVisibleDist);            // High altitude distance
+    float closeDist = std::max(wingspan * 0.8f, minVisibleDist * 0.8f);  // Close-up distance (slightly closer allowed)
     
     // Drift amounts scale with aircraft size
     float driftScale = scale * 0.5f + 0.5f;    // 0.5 to 1.5x based on size
     
+    // Calculate intelligent zoom for external shots based on aircraft size
+    // Larger aircraft need lower zoom (wider view) to stay in frame
+    float baseExternalZoom = CalculateIntelligentZoom(0.85f, frontDist);
+    float closeZoom = CalculateIntelligentZoom(1.0f, closeDist);
+    float wideZoom = CalculateIntelligentZoom(0.75f, highDist);
+    
     // Front hero shot - positioned further out and slightly offset
     g_externalShots.push_back({CameraType::External,
-                               5.0f * scale, height * 0.7f, -frontDist,
-                               10.0f, 175.0f, 0.0f, 0.85f, 10.0f, "Front Hero",
+                               5.0f * scale, std::max(height * 0.7f, MIN_CAMERA_HEIGHT_ABOVE_GROUND), -frontDist,
+                               10.0f, 175.0f, 0.0f, baseExternalZoom, 10.0f, "Front Hero",
                                -0.1f * driftScale, 0.12f * driftScale, 0.25f * driftScale,
                                -0.25f, 0.3f, 0.0f, 0.01f});
     
     // Rear chase - elevated and further back, offset to side
     g_externalShots.push_back({CameraType::External,
-                               -8.0f * scale, height * 1.0f, rearDist,
-                               15.0f, 8.0f, 0.0f, 0.8f, 10.0f, "Rear Chase",
+                               -8.0f * scale, std::max(height * 1.0f, MIN_CAMERA_HEIGHT_ABOVE_GROUND), rearDist,
+                               15.0f, 8.0f, 0.0f, baseExternalZoom * 0.95f, 10.0f, "Rear Chase",
                                0.15f * driftScale, 0.08f * driftScale, -0.18f * driftScale,
                                -0.15f, -0.4f, 0.0f, 0.0f});
     
     // Left flyby - further out to side, more dramatic sweep
     g_externalShots.push_back({CameraType::External,
-                               -sideDist, height * 0.4f, fuselageLen * 0.4f,
-                               5.0f, 82.0f, 2.0f, 0.85f, 12.0f, "Left Flyby",
+                               -sideDist, std::max(height * 0.4f, MIN_CAMERA_HEIGHT_ABOVE_GROUND), fuselageLen * 0.4f,
+                               5.0f, 82.0f, 2.0f, baseExternalZoom, 12.0f, "Left Flyby",
                                0.5f * driftScale, 0.1f * driftScale, -0.6f * driftScale,
                                0.0f, 1.0f, -0.1f, 0.0f});
     
     // Right flyby - further out to side, more dramatic sweep
     g_externalShots.push_back({CameraType::External,
-                               sideDist, height * 0.4f, fuselageLen * 0.4f,
-                               5.0f, -82.0f, -2.0f, 0.85f, 12.0f, "Right Flyby",
+                               sideDist, std::max(height * 0.4f, MIN_CAMERA_HEIGHT_ABOVE_GROUND), fuselageLen * 0.4f,
+                               5.0f, -82.0f, -2.0f, baseExternalZoom, 12.0f, "Right Flyby",
                                -0.5f * driftScale, 0.1f * driftScale, -0.6f * driftScale,
                                0.0f, -1.0f, 0.1f, 0.0f});
     
     // High orbit - high above and further back for wide view
     g_externalShots.push_back({CameraType::External,
                                wingspan * 0.4f, highDist, fuselageLen * 0.8f,
-                               62.0f, -15.0f, 0.0f, 0.75f, 15.0f, "High Orbit",
+                               62.0f, -15.0f, 0.0f, wideZoom, 15.0f, "High Orbit",
                                -0.3f * driftScale, 0.03f * driftScale, 0.0f,
                                0.0f, 2.0f, 0.0f, 0.0f});
     
     // Low angle front - below and forward, offset to avoid fuselage
+    // Note: Y position can be negative (below aircraft) but camera callback will ensure above ground
     g_externalShots.push_back({CameraType::External,
-                               wingspan * 0.3f, -height * 1.0f, -fuselageLen * 0.9f,
-                               -22.0f, 170.0f, 3.0f, 0.9f, 8.0f, "Low Angle Front",
+                               wingspan * 0.3f, height * 0.5f, -fuselageLen * 0.9f,
+                               -15.0f, 170.0f, 3.0f, baseExternalZoom * 1.05f, 8.0f, "Low Angle Front",
                                -0.1f * driftScale, 0.15f * driftScale, 0.2f * driftScale,
                                0.4f, 0.5f, -0.2f, 0.0f});
     
     // Quarter front left - wide angle approach shot
     g_externalShots.push_back({CameraType::External,
-                               -sideDist * 0.8f, height * 1.0f, -frontDist * 0.8f,
-                               14.0f, 135.0f, -1.0f, 0.82f, 10.0f, "Quarter FL",
+                               -sideDist * 0.8f, std::max(height * 1.0f, MIN_CAMERA_HEIGHT_ABOVE_GROUND), -frontDist * 0.8f,
+                               14.0f, 135.0f, -1.0f, baseExternalZoom * 0.97f, 10.0f, "Quarter FL",
                                0.25f * driftScale, 0.06f * driftScale, 0.3f * driftScale,
                                -0.12f, -0.8f, 0.05f, 0.0f});
     
     // Quarter front right - wide angle approach shot
     g_externalShots.push_back({CameraType::External,
-                               sideDist * 0.8f, height * 1.0f, -frontDist * 0.8f,
-                               14.0f, -135.0f, 1.0f, 0.82f, 10.0f, "Quarter FR",
+                               sideDist * 0.8f, std::max(height * 1.0f, MIN_CAMERA_HEIGHT_ABOVE_GROUND), -frontDist * 0.8f,
+                               14.0f, -135.0f, 1.0f, baseExternalZoom * 0.97f, 10.0f, "Quarter FR",
                                -0.25f * driftScale, 0.06f * driftScale, 0.3f * driftScale,
                                -0.12f, 0.8f, -0.05f, 0.0f});
     
     // Quarter rear left - elevated departure shot
     g_externalShots.push_back({CameraType::External,
-                               -sideDist * 0.7f, height * 1.5f, rearDist * 0.8f,
-                               20.0f, 45.0f, 2.0f, 0.8f, 10.0f, "Quarter RL",
+                               -sideDist * 0.7f, std::max(height * 1.5f, MIN_CAMERA_HEIGHT_ABOVE_GROUND), rearDist * 0.8f,
+                               20.0f, 45.0f, 2.0f, baseExternalZoom * 0.95f, 10.0f, "Quarter RL",
                                0.2f * driftScale, 0.04f * driftScale, -0.2f * driftScale,
                                -0.18f, -0.6f, -0.1f, 0.0f});
     
     // Quarter rear right - elevated departure shot  
     g_externalShots.push_back({CameraType::External,
-                               sideDist * 0.7f, height * 1.5f, rearDist * 0.8f,
-                               20.0f, -45.0f, -2.0f, 0.8f, 10.0f, "Quarter RR",
+                               sideDist * 0.7f, std::max(height * 1.5f, MIN_CAMERA_HEIGHT_ABOVE_GROUND), rearDist * 0.8f,
+                               20.0f, -45.0f, -2.0f, baseExternalZoom * 0.95f, 10.0f, "Quarter RR",
                                -0.2f * driftScale, 0.04f * driftScale, -0.2f * driftScale,
                                -0.18f, 0.6f, 0.1f, 0.0f});
     
     // Wing tip left - close wing view with offset
     g_externalShots.push_back({CameraType::External,
-                               -closeDist, height * 0.4f, fuselageLen * 0.2f,
-                               10.0f, 60.0f, -3.0f, 1.0f, 8.0f, "Wing Left",
+                               -closeDist, std::max(height * 0.4f, MIN_CAMERA_HEIGHT_ABOVE_GROUND), fuselageLen * 0.2f,
+                               10.0f, 60.0f, -3.0f, closeZoom, 8.0f, "Wing Left",
                                0.1f * driftScale, 0.04f * driftScale, -0.12f * driftScale,
                                0.0f, 0.6f, 0.15f, 0.0f});
     
     // Wing tip right - close wing view with offset
     g_externalShots.push_back({CameraType::External,
-                               closeDist, height * 0.4f, fuselageLen * 0.2f,
-                               10.0f, -60.0f, 3.0f, 1.0f, 8.0f, "Wing Right",
+                               closeDist, std::max(height * 0.4f, MIN_CAMERA_HEIGHT_ABOVE_GROUND), fuselageLen * 0.2f,
+                               10.0f, -60.0f, 3.0f, closeZoom, 8.0f, "Wing Right",
                                -0.1f * driftScale, 0.04f * driftScale, -0.12f * driftScale,
                                0.0f, -0.6f, -0.15f, 0.0f});
     
     // Engine close-up left - positioned to see engine from outside
     g_externalShots.push_back({CameraType::External,
-                               -wingspan * 0.4f, height * 0.15f, -fuselageLen * 0.1f,
-                               8.0f, 75.0f, 0.0f, 1.2f, 7.0f, "Engine L",
+                               -wingspan * 0.4f, std::max(height * 0.15f, MIN_CAMERA_HEIGHT_ABOVE_GROUND), -fuselageLen * 0.1f,
+                               8.0f, 75.0f, 0.0f, closeZoom * 1.2f, 7.0f, "Engine L",
                                0.06f * driftScale, 0.03f * driftScale, -0.1f * driftScale,
                                0.0f, 0.4f, 0.0f, 0.0f});
     
     // Engine close-up right - positioned to see engine from outside
     g_externalShots.push_back({CameraType::External,
-                               wingspan * 0.4f, height * 0.15f, -fuselageLen * 0.1f,
-                               8.0f, -75.0f, 0.0f, 1.2f, 7.0f, "Engine R",
+                               wingspan * 0.4f, std::max(height * 0.15f, MIN_CAMERA_HEIGHT_ABOVE_GROUND), -fuselageLen * 0.1f,
+                               8.0f, -75.0f, 0.0f, closeZoom * 1.2f, 7.0f, "Engine R",
                                -0.06f * driftScale, 0.03f * driftScale, -0.1f * driftScale,
                                0.0f, -0.4f, 0.0f, 0.0f});
     
     // Tail view - looking at tail from behind and above
     g_externalShots.push_back({CameraType::External,
-                               -wingspan * 0.25f, height * 1.2f, rearDist * 1.1f,
-                               28.0f, 10.0f, 0.0f, 0.85f, 9.0f, "Tail View",
+                               -wingspan * 0.25f, std::max(height * 1.2f, MIN_CAMERA_HEIGHT_ABOVE_GROUND), rearDist * 1.1f,
+                               28.0f, 10.0f, 0.0f, baseExternalZoom, 9.0f, "Tail View",
                                0.1f * driftScale, 0.06f * driftScale, -0.12f * driftScale,
                                -0.25f, -0.6f, 0.0f, 0.0f});
     
     // Belly view - looking up at aircraft from below
+    // Note: This shot looks up from below, so Y position needs special handling
     g_externalShots.push_back({CameraType::External,
-                               wingspan * 0.2f, -height * 1.5f, 0.0f,
-                               -35.0f, -5.0f, 0.0f, 0.9f, 8.0f, "Belly View",
+                               wingspan * 0.2f, height * 0.3f, 0.0f,
+                               -20.0f, -5.0f, 0.0f, baseExternalZoom * 1.05f, 8.0f, "Belly View",
                                -0.05f * driftScale, 0.08f * driftScale, 0.0f,
                                0.3f, 0.4f, 0.0f, 0.0f});
     
@@ -1226,14 +1278,32 @@ static float LerpAngle(float a, float b, float t) {
 }
 
 /**
- * Linear drift with smooth ease-in-out for consistent camera movement
- * Creates a steady, directional drift like cinematic camera movements
+ * Ease-in only function for smooth start without slowdown at end
+ * This creates acceleration at start but maintains constant speed until end
+ */
+static float EaseInCubic(float t) {
+    return t * t * t;
+}
+
+/**
+ * Linear drift with smooth ease-in only for consistent camera movement
+ * Creates a steady, directional drift that accelerates smoothly at start
+ * but maintains constant speed until end (no slowdown before cut)
  * Once a drift direction is set, it maintains that direction throughout the shot
  */
 static float LinearDrift(float baseValue, float driftAmount, float normalizedTime) {
-    // Use ease-in-out for smooth start and end of drift
+    // Use ease-in only for smooth start without slowdown at end
     // normalizedTime is 0 at start, 1 at end of shot
-    float smoothT = EaseInOutCubic(normalizedTime);
+    // Apply ease-in only for first 30% of the shot, then linear progression
+    float smoothT;
+    if (normalizedTime < 0.3f) {
+        // Ease-in phase: smooth acceleration
+        float t = normalizedTime / 0.3f;  // Normalize to 0-1 for ease-in portion
+        smoothT = EaseInCubic(t) * 0.3f;  // Scale back to 0-0.3 range
+    } else {
+        // Linear phase: constant speed until end (no deceleration)
+        smoothT = normalizedTime;
+    }
     return baseValue + driftAmount * smoothT;
 }
 
@@ -1242,6 +1312,49 @@ static float LinearDrift(float baseValue, float driftAmount, float normalizedTim
  */
 static float EaseInOutSine(float t) {
     return -(std::cos(PI * t) - 1.0f) / 2.0f;
+}
+
+/**
+ * Ensure camera Y position is above ground level
+ * Prevents camera from going underground
+ * @param cameraY The camera's Y position in world coordinates
+ * @param aircraftY The aircraft's Y position in world coordinates
+ * @return Adjusted Y position that is above ground
+ */
+static float EnsureAboveGround(float cameraY, float aircraftY) {
+    // Estimate ground level based on aircraft position and height
+    // When aircraft is on ground, its Y position is approximately at gear level
+    float estimatedGroundLevel = aircraftY - g_aircraftDims.height;
+    
+    // Ensure camera is at least MIN_CAMERA_HEIGHT_ABOVE_GROUND meters above ground
+    float minCameraY = estimatedGroundLevel + MIN_CAMERA_HEIGHT_ABOVE_GROUND;
+    
+    return std::max(cameraY, minCameraY);
+}
+
+/**
+ * Validate and adjust camera position to ensure aircraft is visible
+ * This checks distance and applies corrections if needed
+ * @param camX, camY, camZ - Camera position in aircraft-relative coordinates
+ * @param type - The type of camera shot
+ */
+static void ValidateCameraPosition(float& camX, float& camY, float& camZ, CameraType type) {
+    if (type == CameraType::Cockpit) {
+        // Cockpit views don't need distance validation
+        return;
+    }
+    
+    // Calculate current distance from aircraft center
+    float distance = std::sqrt(camX * camX + camY * camY + camZ * camZ);
+    float minDistance = CalculateMinVisibleDistance();
+    
+    // If too close, scale position outward to minimum distance
+    if (distance < minDistance && distance > 0.001f) {
+        float scaleFactor = minDistance / distance;
+        camX *= scaleFactor;
+        camY *= scaleFactor;
+        camZ *= scaleFactor;
+    }
 }
 
 // Note: CatmullRom spline function may be added in future for advanced path interpolation
@@ -1651,9 +1764,18 @@ static int CameraControlCallback(XPLMCameraPosition_t* outCameraPosition, int in
         // Smooth transition between shots using ease-in-out
         float t = EaseInOutCubic(g_transitionProgress);
         
-        outCameraPosition->x = Lerp(g_startPos.x, g_targetPos.x, t);
-        outCameraPosition->y = Lerp(g_startPos.y, g_targetPos.y, t);
-        outCameraPosition->z = Lerp(g_startPos.z, g_targetPos.z, t);
+        float transX = Lerp(g_startPos.x, g_targetPos.x, t);
+        float transY = Lerp(g_startPos.y, g_targetPos.y, t);
+        float transZ = Lerp(g_startPos.z, g_targetPos.z, t);
+        
+        // Ensure camera doesn't go underground during transition
+        if (g_currentShot.type == CameraType::External) {
+            transY = EnsureAboveGround(transY, acfY);
+        }
+        
+        outCameraPosition->x = transX;
+        outCameraPosition->y = transY;
+        outCameraPosition->z = transZ;
         outCameraPosition->pitch = Lerp(g_startPos.pitch, g_targetPos.pitch, t);
         outCameraPosition->heading = LerpAngle(g_startPos.heading, g_targetPos.heading, t);
         outCameraPosition->roll = Lerp(g_startPos.roll, g_targetPos.roll, t);
@@ -1669,7 +1791,7 @@ static int CameraControlCallback(XPLMCameraPosition_t* outCameraPosition, int in
         float normalizedTime = g_shotElapsedTime / g_currentShot.duration;
         normalizedTime = std::clamp(normalizedTime, 0.0f, 1.0f);
         
-        // Position drift with smooth ease-in-out (consistent direction throughout shot)
+        // Position drift with smooth ease-in only (no slowdown at end)
         float driftedX = LinearDrift(g_currentShot.x, g_currentShot.driftX * g_currentShot.duration, normalizedTime);
         float driftedY = LinearDrift(g_currentShot.y, g_currentShot.driftY * g_currentShot.duration, normalizedTime);
         float driftedZ = LinearDrift(g_currentShot.z, g_currentShot.driftZ * g_currentShot.duration, normalizedTime);
@@ -1680,6 +1802,9 @@ static int CameraControlCallback(XPLMCameraPosition_t* outCameraPosition, int in
             driftedX += g_aircraftDims.pilotEyeX;
             driftedY += g_aircraftDims.pilotEyeY;
             driftedZ += g_aircraftDims.pilotEyeZ;
+        } else {
+            // For external shots, validate camera position to ensure aircraft is visible
+            ValidateCameraPosition(driftedX, driftedY, driftedZ, g_currentShot.type);
         }
         
         // Rotation drift with same consistent direction
@@ -1691,9 +1816,18 @@ static int CameraControlCallback(XPLMCameraPosition_t* outCameraPosition, int in
         float driftedZoom = LinearDrift(g_currentShot.zoom, g_currentShot.driftZoom * g_currentShot.duration, normalizedTime);
         
         // Transform position offset from aircraft-relative to world coordinates
-        outCameraPosition->x = acfX + driftedX * cosH - driftedZ * sinH;
-        outCameraPosition->y = acfY + driftedY;
-        outCameraPosition->z = acfZ + driftedX * sinH + driftedZ * cosH;
+        float worldCamX = acfX + driftedX * cosH - driftedZ * sinH;
+        float worldCamY = acfY + driftedY;
+        float worldCamZ = acfZ + driftedX * sinH + driftedZ * cosH;
+        
+        // Ensure camera doesn't go underground for external shots
+        if (g_currentShot.type == CameraType::External) {
+            worldCamY = EnsureAboveGround(worldCamY, acfY);
+        }
+        
+        outCameraPosition->x = worldCamX;
+        outCameraPosition->y = worldCamY;
+        outCameraPosition->z = worldCamZ;
         outCameraPosition->pitch = driftedPitch;
         outCameraPosition->heading = acfHeading + driftedHeading;
         outCameraPosition->roll = driftedRoll;
