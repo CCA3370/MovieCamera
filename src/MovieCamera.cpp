@@ -126,6 +126,8 @@ constexpr float MIN_VALID_CG_RANGE = 0.5f;
 constexpr float MIN_CAMERA_HEIGHT_ABOVE_GROUND = 2.0f;   // Minimum camera height above ground (meters)
 constexpr float MIN_CAMERA_DISTANCE_FROM_AIRCRAFT = 5.0f; // Minimum distance to ensure aircraft is visible (meters)
 constexpr float ZOOM_SCALE_FACTOR = 0.7f;                 // Base zoom factor scaled by aircraft size
+constexpr float EASE_IN_DURATION_RATIO = 0.3f;            // Ratio of shot duration for ease-in phase (30%)
+constexpr float CLOSE_DISTANCE_SCALE = 0.8f;              // Scale factor for close-up camera distances
 
 /**
  * Aircraft dimensions structure
@@ -932,18 +934,13 @@ static float CalculateMinVisibleDistance() {
  * Larger aircraft need lower zoom (wider view) to stay in frame
  * Smaller aircraft need higher zoom (closer view) to be visible
  */
-static float CalculateIntelligentZoom(float baseZoom, float cameraDistance) {
+static float CalculateIntelligentZoom(float baseZoom, [[maybe_unused]] float cameraDistance) {
     // Get the scaling factor for the aircraft
     float scale = g_aircraftDims.getScaleFactor();
     
     // For larger aircraft (scale > 1), reduce zoom to fit in frame
     // For smaller aircraft (scale < 1), increase zoom to make aircraft more visible
     float zoomAdjustment = 1.0f / std::sqrt(scale);
-    
-    // Also consider camera distance - farther cameras may need more zoom
-    float distanceFactor = cameraDistance / (g_aircraftDims.wingspan * 2.0f);
-    distanceFactor = std::clamp(distanceFactor, 0.5f, 2.0f);
-    (void)distanceFactor; // Currently unused, reserved for future enhancement
     
     // Combine adjustments
     float adjustedZoom = baseZoom * zoomAdjustment * ZOOM_SCALE_FACTOR;
@@ -1040,7 +1037,7 @@ static void GenerateDynamicCameraShots() {
     float rearDist = std::max(fuselageLen * 1.5f, minVisibleDist);       // Distance behind aircraft
     float sideDist = std::max(wingspan * 1.3f, minVisibleDist);          // Distance to side
     float highDist = std::max(height * 4.0f, minVisibleDist);            // High altitude distance
-    float closeDist = std::max(wingspan * 0.8f, minVisibleDist * 0.8f);  // Close-up distance (slightly closer allowed)
+    float closeDist = std::max(wingspan * CLOSE_DISTANCE_SCALE, minVisibleDist * CLOSE_DISTANCE_SCALE);  // Close-up distance
     
     // Drift amounts scale with aircraft size
     float driftScale = scale * 0.5f + 0.5f;    // 0.5 to 1.5x based on size
@@ -1086,8 +1083,8 @@ static void GenerateDynamicCameraShots() {
                                -0.3f * driftScale, 0.03f * driftScale, 0.0f,
                                0.0f, 2.0f, 0.0f, 0.0f});
     
-    // Low angle front - below and forward, offset to avoid fuselage
-    // Note: Y position can be negative (below aircraft) but camera callback will ensure above ground
+    // Low angle front - positioned low but above ground, looking up at aircraft
+    // The camera is placed at a low height looking up to create dramatic upward angle
     g_externalShots.push_back({CameraType::External,
                                wingspan * 0.3f, height * 0.5f, -fuselageLen * 0.9f,
                                -15.0f, 170.0f, 3.0f, baseExternalZoom * 1.05f, 8.0f, "Low Angle Front",
@@ -1157,8 +1154,8 @@ static void GenerateDynamicCameraShots() {
                                0.1f * driftScale, 0.06f * driftScale, -0.12f * driftScale,
                                -0.25f, -0.6f, 0.0f, 0.0f});
     
-    // Belly view - looking up at aircraft from below
-    // Note: This shot looks up from below, so Y position needs special handling
+    // Belly view - low angle shot looking up at the aircraft underside
+    // Positioned low and offset to the side with negative pitch to look upward
     g_externalShots.push_back({CameraType::External,
                                wingspan * 0.2f, height * 0.3f, 0.0f,
                                -20.0f, -5.0f, 0.0f, baseExternalZoom * 1.05f, 8.0f, "Belly View",
@@ -1294,12 +1291,12 @@ static float EaseInCubic(float t) {
 static float LinearDrift(float baseValue, float driftAmount, float normalizedTime) {
     // Use ease-in only for smooth start without slowdown at end
     // normalizedTime is 0 at start, 1 at end of shot
-    // Apply ease-in only for first 30% of the shot, then linear progression
+    // Apply ease-in only for first portion (EASE_IN_DURATION_RATIO) of the shot, then linear progression
     float smoothT;
-    if (normalizedTime < 0.3f) {
+    if (normalizedTime < EASE_IN_DURATION_RATIO) {
         // Ease-in phase: smooth acceleration
-        float t = normalizedTime / 0.3f;  // Normalize to 0-1 for ease-in portion
-        smoothT = EaseInCubic(t) * 0.3f;  // Scale back to 0-0.3 range
+        float t = normalizedTime / EASE_IN_DURATION_RATIO;  // Normalize to 0-1 for ease-in portion
+        smoothT = EaseInCubic(t) * EASE_IN_DURATION_RATIO;  // Scale back to 0-EASE_IN_DURATION_RATIO range
     } else {
         // Linear phase: constant speed until end (no deceleration)
         smoothT = normalizedTime;
