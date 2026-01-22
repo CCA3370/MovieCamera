@@ -60,40 +60,6 @@ The plugin provides smooth transitions between various camera angles with **cont
 - **Cockpit Zoom Breathing**: In cockpit views, the focal length slowly changes to simulate aperture/depth-of-field effects
 - **Instant View Switching**: Camera switches between viewpoints instantly for a snappy, responsive feel
 
-### Custom Camera Paths
-
-Create your own camera movement paths with keyframe-based animation:
-
-**Features:**
-- Define multiple keyframes with position, rotation, zoom, focal length, and aperture
-- Smooth interpolation between keyframes using ease-in-out curves
-- Support for looping paths
-- Save and load custom paths (stored in `camera_paths.cfg`)
-- Preview paths in real-time while editing
-- **3D Trajectory Visualization** - See your camera path drawn in 3D space
-
-**Path Editor:**
-1. Open Settings window from `Plugins > MovieCamera > Settings`
-2. Click "New Path" to create a new custom path
-3. **Capture Camera Positions**:
-   - Position X-Plane's camera where you want a keyframe
-   - Click "Capture Position" to add the current camera location as a keyframe
-   - Repeat to build your complete camera path
-   - Use "Update Selected" to modify an existing keyframe with the current camera position
-4. Enable "Show 3D Trajectory" to visualize:
-   - **Green line**: The camera path trajectory
-   - **Yellow dots**: Keyframe positions
-   - **Red dot**: Currently selected keyframe
-5. Fine-tune keyframe parameters:
-   - **Time**: When this keyframe occurs (seconds)
-   - **Position (X, Y, Z)**: Camera offset from aircraft
-   - **Rotation (Pitch, Heading, Roll)**: Camera orientation
-   - **Zoom**: Camera zoom level
-   - **Focal Length**: Lens focal length (mm)
-   - **Aperture**: f-stop value for DOF simulation
-6. Click "Preview" to see the path in action
-7. Click "Save Path" to save for future use
-
 ### Intelligent Shot Switching
 - Each shot lasts 6-15 seconds (configurable)
 - Smooth ease-in-out transitions between shots
@@ -105,13 +71,43 @@ When mouse movement is detected:
 - View returns to default
 - After the configured delay without mouse movement, camera control resumes
 
+### Aircraft Attitude Compensation
+External camera shots now account for the aircraft's full attitude (heading, pitch, and roll), keeping camera positions relative to the aircraft's orientation during climbs, dives, and turns.
+
+### Cinematic Effects (X-Plane 12+)
+
+The plugin now supports advanced cinematic camera effects using X-Plane's native datarefs:
+
+**FOV/Focal Length Control:**
+- Simulate different camera lenses by controlling field of view
+- Preset buttons for common focal lengths: 24mm, 35mm, 50mm, 85mm, 135mm
+- Smooth FOV transitions between shots
+- Configurable transition speed
+
+**Handheld Camera Effect:**
+- Adds realistic camera shake for external views
+- Adjustable intensity from subtle to dramatic
+- Perfect for chase cam and action shots
+
+**G-Force Camera Effect:**
+- Internal view camera responds to aircraft G-forces
+- Creates immersive cockpit experience during maneuvers
+
 ## Settings
 
 Configure via `Plugins > MovieCamera > Settings`:
 - **Delay (seconds)**: Time to wait after mouse stops moving before activating/resuming camera (default: 60)
 - **Auto Alt (ft)**: Altitude threshold above which Auto mode can activate (default: 18000)
 - **Shot Duration Min/Max (s)**: Range for random shot duration (default: 6-15 seconds)
-- **Custom Camera Paths**: Create, edit, and manage custom camera movement paths
+- **Cinematic Effects**:
+  - **Enable FOV Effect**: Toggle focal length simulation
+  - **Base FOV**: Default field of view angle
+  - **Transition Speed**: How fast FOV changes between shots
+  - **Enable Handheld Effect**: Toggle camera shake
+  - **Shake Intensity**: Amount of camera shake
+  - **Enable G-Force Effect**: Toggle G-force camera movement
+
+Settings are automatically saved to `settings.cfg` when the plugin is disabled and loaded when enabled.
 
 ## Building
 

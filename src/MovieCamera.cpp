@@ -55,6 +55,14 @@
 constexpr float PI = 3.14159265359f;
 constexpr float TWO_PI = 2.0f * PI;
 
+// FOV and focal length constants
+// Based on 35mm full-frame equivalent (36mm sensor width)
+constexpr float SENSOR_WIDTH_MM = 36.0f;           // 35mm full-frame sensor width
+constexpr float DEFAULT_FOV_DEG = 60.0f;           // Default X-Plane horizontal FOV
+constexpr float MIN_FOV_DEG = 20.0f;               // Minimum FOV (telephoto, ~90mm equivalent)
+constexpr float MAX_FOV_DEG = 120.0f;              // Maximum FOV (wide angle, ~15mm equivalent)
+constexpr float FOV_TRANSITION_SPEED = 15.0f;      // FOV change speed (degrees per second)
+
 // Plugin State
 enum class PluginMode {
     Off,      // Plugin functionality is off
@@ -79,29 +87,6 @@ struct CameraShot {
     float driftX, driftY, driftZ;          // Position drift per second
     float driftPitch, driftHeading, driftRoll;  // Rotation drift per second
     float driftZoom;                        // Zoom drift per second (for cockpit)
-};
-
-// Keyframe for custom camera paths
-struct CameraKeyframe {
-    float time;              // Time in seconds from path start
-    float x, y, z;           // Position offset from aircraft
-    float pitch, heading, roll;
-    float zoom;
-    float focalLength;       // Focal length parameter (mm equivalent)
-    float aperture;          // Aperture (f-stop) for DOF simulation
-};
-
-// Custom camera path with keyframes
-struct CustomCameraPath {
-    std::string name;
-    CameraType type;
-    std::vector<CameraKeyframe> keyframes;
-    bool isLooping;
-    
-    float getTotalDuration() const {
-        if (keyframes.empty()) return 0.0f;
-        return keyframes.back().time;
-    }
 };
 
 // Aircraft dimension constants
@@ -223,7 +208,10 @@ static XPLMDataRef g_drViewType = nullptr;
 static XPLMDataRef g_drTerrainY = nullptr;         // Terrain Y coordinate at aircraft position (AGL reference)
 
 // Aircraft dimension datarefs (read from .acf file by X-Plane)
-static XPLMDataRef g_drAcfWingSpan = nullptr;      // Wing span dataref (various sources tried)
+static XPLMDataRef g_drAcfSizeX = nullptr;         // Aircraft shadow/view size X (width/wingspan)
+static XPLMDataRef g_drAcfSizeZ = nullptr;         // Aircraft shadow/view size Z (length)
+static XPLMDataRef g_drAcfSemilenSEG = nullptr;    // Wing semilen per segment (array[56])
+static XPLMDataRef g_drAcfSemilenJND = nullptr;    // Joined wing semilen (array[56])
 static XPLMDataRef g_drAcfCgZFwd = nullptr;        // CG forward limit Z (approximates nose position)
 static XPLMDataRef g_drAcfCgZAft = nullptr;        // CG aft limit Z (approximates tail position)
 static XPLMDataRef g_drAcfMinY = nullptr;          // Minimum Y coordinate (bottom, e.g., gear)
@@ -232,28 +220,33 @@ static XPLMDataRef g_drAcfPeX = nullptr;           // Pilot eye X position
 static XPLMDataRef g_drAcfPeY = nullptr;           // Pilot eye Y position  
 static XPLMDataRef g_drAcfPeZ = nullptr;           // Pilot eye Z position
 
+// Camera effect datarefs (writable - for cinematic effects)
+static XPLMDataRef g_drFovHorizontal = nullptr;    // Horizontal field of view (degrees) - writable
+static XPLMDataRef g_drFovVertical = nullptr;      // Vertical field of view (degrees) - writable
+static XPLMDataRef g_drHandheldCam = nullptr;      // Handheld camera shake for external views - writable
+static XPLMDataRef g_drGloadedCam = nullptr;       // G-loaded camera for internal views - writable
+static XPLMDataRef g_drViewIsExternal = nullptr;   // Is view external? (readonly)
+static XPLMDataRef g_drIsReplay = nullptr;         // Is in replay mode? (readonly)
+
+// Cinematic effect settings
+static bool g_enableFovEffect = true;              // Enable focal length simulation via FOV
+static bool g_enableHandheldEffect = false;        // Enable handheld camera shake (off by default, user preference)
+static bool g_enableGForceEffect = false;          // Enable G-force camera effect for internal views
+static float g_baseFov = 60.0f;                    // Base horizontal FOV (degrees)
+static float g_currentFov = 60.0f;                 // Current FOV being applied
+static float g_targetFov = 60.0f;                  // Target FOV for smooth transitions
+static float g_originalFov = 60.0f;                // Store original FOV to restore on stop
+static float g_fovTransitionSpeed = 15.0f;         // FOV transition speed (degrees per second)
+static float g_handheldIntensity = 0.5f;           // Handheld camera shake intensity (0-1)
+static float g_originalHandheldCam = 0.0f;         // Store original handheld camera setting
+static float g_originalGloadedCam = 0.0f;          // Store original G-loaded camera setting
+
 // Flight loop callback
 static XPLMFlightLoopID g_flightLoopId = nullptr;
 
 // Predefined camera shots
 static std::vector<CameraShot> g_cockpitShots;
 static std::vector<CameraShot> g_externalShots;
-
-// Custom camera paths
-static std::vector<CustomCameraPath> g_customPaths;
-static int g_currentCustomPathIndex = -1;
-static bool g_usingCustomPath = false;
-static float g_customPathTime = 0.0f;
-
-// Path editor state
-static bool g_pathEditorOpen = false;
-static CustomCameraPath g_editingPath;
-static int g_editingKeyframeIndex = -1;
-static char g_pathNameBuffer[64] = "";
-static bool g_showTrajectoryPreview = false;  // Toggle for 3D trajectory visualization
-
-// Draw callback for 3D trajectory visualization
-static int DrawTrajectoryCallback(XPLMDrawingPhase inPhase, int inIsBefore, void* inRefcon);
 
 /**
  * Settings Window using ImgWindow
@@ -270,7 +263,6 @@ protected:
 static std::unique_ptr<SettingsWindow> g_settingsWindow;
 
 // Function declarations
-static void InitializeCameraShots();
 static void ReadAircraftDimensions();
 static void GenerateDynamicCameraShots();
 static void UpdateMenuState();
@@ -286,10 +278,14 @@ static CameraShot SelectNextShot();
 static float Lerp(float a, float b, float t);
 static float EaseInOutCubic(float t);
 static float LinearDrift(float baseValue, float driftAmount, float normalizedTime);
-static CameraKeyframe InterpolateKeyframes(const CameraKeyframe& a, const CameraKeyframe& b, float t);
-static void SaveCustomPaths();
-static void LoadCustomPaths();
+static void SaveSettings();
+static void LoadSettings();
 static std::string GetPluginPath();
+static float FocalLengthToFov(float focalLengthMm);
+static float FovToFocalLength(float fovDeg);
+static void ApplyFovEffect(float targetFocalLength, float deltaTime);
+static void SaveCameraEffectState();
+static void RestoreCameraEffectState();
 
 /**
  * SettingsWindow constructor
@@ -380,345 +376,78 @@ void SettingsWindow::buildInterface() {
     ImGui::Separator();
     ImGui::Spacing();
     
-    // Custom Camera Paths Section
-    ImGui::Text("Custom Camera Paths");
+    // Cinematic Effects Section
+    ImGui::Text("Cinematic Effects");
     ImGui::SameLine();
     ImGui::TextDisabled("(?)");
     if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Create custom camera movement paths with keyframes.\nDefine position, rotation, zoom, focal length and aperture at each keyframe.");
+        ImGui::SetTooltip("Configure camera effects for more cinematic footage.\nFOV control simulates different focal lengths.\nHandheld effect adds realistic camera shake.");
     }
     
-    // List existing paths
-    if (!g_customPaths.empty()) {
-        ImGui::Text("Saved Paths:");
-        for (size_t i = 0; i < g_customPaths.size(); ++i) {
-            ImGui::PushID(static_cast<int>(i));
-            
-            bool isSelected = (g_currentCustomPathIndex == static_cast<int>(i) && g_usingCustomPath);
-            if (ImGui::Selectable(g_customPaths[i].name.c_str(), isSelected, 0, ImVec2(120, 0))) {
-                // Select this path for playback
-                g_currentCustomPathIndex = static_cast<int>(i);
-                g_usingCustomPath = true;
-                g_customPathTime = 0.0f;
-                if (!g_functionActive) {
-                    StartCameraControl();
-                }
-            }
-            
-            ImGui::SameLine();
-            if (ImGui::SmallButton("Edit")) {
-                g_pathEditorOpen = true;
-                g_editingPath = g_customPaths[i];
-                snprintf(g_pathNameBuffer, sizeof(g_pathNameBuffer), "%s", g_customPaths[i].name.c_str());
-                g_editingKeyframeIndex = -1;
-            }
-            
-            ImGui::SameLine();
-            if (ImGui::SmallButton("Del")) {
-                g_customPaths.erase(g_customPaths.begin() + static_cast<std::ptrdiff_t>(i));
-                SaveCustomPaths();
-                if (g_currentCustomPathIndex == static_cast<int>(i)) {
-                    g_usingCustomPath = false;
-                    g_currentCustomPathIndex = -1;
-                }
-            }
-            
-            ImGui::PopID();
-        }
+    // FOV/Focal Length Effect
+    ImGui::Checkbox("Enable FOV Effect", &g_enableFovEffect);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Enable focal length simulation via FOV control");
     }
     
-    // Button to create new path
-    if (ImGui::Button("New Path", ImVec2(80, 0))) {
-        g_pathEditorOpen = true;
-        g_editingPath = CustomCameraPath();
-        g_editingPath.name = "New Path";
-        g_editingPath.type = CameraType::External;
-        g_editingPath.isLooping = false;
-        snprintf(g_pathNameBuffer, sizeof(g_pathNameBuffer), "New Path");
-        g_editingKeyframeIndex = -1;
-        g_showTrajectoryPreview = true;  // Enable trajectory preview by default
+    if (g_enableFovEffect) {
+        ImGui::Indent();
         
-        // Start with empty keyframes - user will capture positions
-        g_editingPath.keyframes.clear();
-    }
-    
-    ImGui::SameLine();
-    if (g_usingCustomPath && ImGui::Button("Stop Path", ImVec2(80, 0))) {
-        g_usingCustomPath = false;
-        g_currentCustomPathIndex = -1;
-    }
-    
-    // Path Editor Window
-    if (g_pathEditorOpen) {
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Text("Path Editor");
+        // Display current focal length equivalent
+        float currentFocalLength = FovToFocalLength(g_baseFov);
+        ImGui::Text("Focal Length: %.1f mm (%.1f° FOV)", currentFocalLength, g_baseFov);
         
-        // Trajectory preview toggle with help text
-        ImGui::Checkbox("Show 3D Trajectory", &g_showTrajectoryPreview);
-        ImGui::SameLine();
-        ImGui::TextDisabled("(?)");
-        if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("When enabled, draws the camera path in 3D space.\nGreen line = path trajectory\nYellow dots = keyframes\nRed dot = selected keyframe");
+        // FOV slider
+        ImGui::SetNextItemWidth(200);
+        if (ImGui::SliderFloat("Base FOV##fov", &g_baseFov, MIN_FOV_DEG, MAX_FOV_DEG, "%.1f°")) {
+            // Keep within valid range
+            if (g_baseFov < MIN_FOV_DEG) g_baseFov = MIN_FOV_DEG;
+            if (g_baseFov > MAX_FOV_DEG) g_baseFov = MAX_FOV_DEG;
         }
         
-        ImGui::Spacing();
-        
-        // Path name
-        ImGui::Text("Name:");
+        // Focal length presets
+        ImGui::Text("Presets:");
         ImGui::SameLine();
+        if (ImGui::SmallButton("24mm")) g_baseFov = FocalLengthToFov(24.0f);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("35mm")) g_baseFov = FocalLengthToFov(35.0f);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("50mm")) g_baseFov = FocalLengthToFov(50.0f);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("85mm")) g_baseFov = FocalLengthToFov(85.0f);
+        ImGui::SameLine();
+        if (ImGui::SmallButton("135mm")) g_baseFov = FocalLengthToFov(135.0f);
+        
+        // Transition speed
         ImGui::SetNextItemWidth(150);
-        ImGui::InputText("##pathname", g_pathNameBuffer, sizeof(g_pathNameBuffer));
-        
-        // Path type
-        ImGui::Text("Type:");
-        ImGui::SameLine();
-        int typeInt = static_cast<int>(g_editingPath.type);
-        if (ImGui::RadioButton("Cockpit", &typeInt, 0)) g_editingPath.type = CameraType::Cockpit;
-        ImGui::SameLine();
-        if (ImGui::RadioButton("External", &typeInt, 1)) g_editingPath.type = CameraType::External;
-        
-        // Looping
-        ImGui::Checkbox("Looping", &g_editingPath.isLooping);
-        
-        ImGui::Spacing();
-        ImGui::Separator();
-        
-        // Capture current camera position section
-        ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Capture Camera Position");
-        ImGui::SameLine();
-        ImGui::TextDisabled("(?)");
+        ImGui::SliderFloat("Transition Speed##fovspeed", &g_fovTransitionSpeed, 1.0f, 30.0f, "%.1f");
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Move X-Plane's camera to your desired position,\nthen click 'Capture Position' to add it as a keyframe.\nBuild your camera path by capturing multiple positions.");
+            ImGui::SetTooltip("Speed of FOV transitions between shots (degrees per second)");
         }
         
-        if (ImGui::Button("Capture Position", ImVec2(120, 0))) {
-            // Read current camera position
-            XPLMCameraPosition_t camPos;
-            XPLMReadCameraPosition(&camPos);
-            
-            // Get aircraft position to calculate relative offset
-            float acfX = XPLMGetDataf(g_drLocalX);
-            float acfY = XPLMGetDataf(g_drLocalY);
-            float acfZ = XPLMGetDataf(g_drLocalZ);
-            float acfHeading = XPLMGetDataf(g_drHeading);
-            
-            // Transform world camera position to aircraft-relative coordinates
-            float rad = acfHeading * PI / 180.0f;
-            float cosH = std::cos(rad);
-            float sinH = std::sin(rad);
-            
-            // Calculate offset from aircraft
-            float dx = camPos.x - acfX;
-            float dy = camPos.y - acfY;
-            float dz = camPos.z - acfZ;
-            
-            // Rotate to aircraft-relative coordinates
-            float relX = dx * cosH + dz * sinH;
-            float relY = dy;
-            float relZ = -dx * sinH + dz * cosH;
-            
-            // Calculate relative heading
-            float relHeading = camPos.heading - acfHeading;
-            while (relHeading > 180.0f) relHeading -= 360.0f;
-            while (relHeading < -180.0f) relHeading += 360.0f;
-            
-            // Create new keyframe
-            CameraKeyframe newKf;
-            newKf.time = g_editingPath.keyframes.empty() ? 0.0f : g_editingPath.keyframes.back().time + 3.0f;
-            newKf.x = relX;
-            newKf.y = relY;
-            newKf.z = relZ;
-            newKf.pitch = camPos.pitch;
-            newKf.heading = relHeading;
-            newKf.roll = camPos.roll;
-            newKf.zoom = camPos.zoom;
-            newKf.focalLength = 50.0f;
-            newKf.aperture = 2.8f;
-            
-            g_editingPath.keyframes.push_back(newKf);
-            g_editingKeyframeIndex = static_cast<int>(g_editingPath.keyframes.size()) - 1;
-        }
-        
-        ImGui::SameLine();
-        if (ImGui::Button("Update Selected", ImVec2(110, 0))) {
-            if (g_editingKeyframeIndex >= 0 && g_editingKeyframeIndex < static_cast<int>(g_editingPath.keyframes.size())) {
-                // Read current camera position
-                XPLMCameraPosition_t camPos;
-                XPLMReadCameraPosition(&camPos);
-                
-                // Get aircraft position
-                float acfX = XPLMGetDataf(g_drLocalX);
-                float acfY = XPLMGetDataf(g_drLocalY);
-                float acfZ = XPLMGetDataf(g_drLocalZ);
-                float acfHeading = XPLMGetDataf(g_drHeading);
-                
-                // Transform to aircraft-relative
-                float rad = acfHeading * PI / 180.0f;
-                float cosH = std::cos(rad);
-                float sinH = std::sin(rad);
-                
-                float dx = camPos.x - acfX;
-                float dy = camPos.y - acfY;
-                float dz = camPos.z - acfZ;
-                
-                float relX = dx * cosH + dz * sinH;
-                float relY = dy;
-                float relZ = -dx * sinH + dz * cosH;
-                
-                float relHeading = camPos.heading - acfHeading;
-                while (relHeading > 180.0f) relHeading -= 360.0f;
-                while (relHeading < -180.0f) relHeading += 360.0f;
-                
-                // Update selected keyframe
-                CameraKeyframe& kf = g_editingPath.keyframes[g_editingKeyframeIndex];
-                kf.x = relX;
-                kf.y = relY;
-                kf.z = relZ;
-                kf.pitch = camPos.pitch;
-                kf.heading = relHeading;
-                kf.roll = camPos.roll;
-                kf.zoom = camPos.zoom;
-            }
-        }
+        ImGui::Unindent();
+    }
+    
+    // Handheld Camera Effect
+    ImGui::Checkbox("Enable Handheld Effect", &g_enableHandheldEffect);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Enable handheld camera shake effect for external views");
+    }
+    
+    if (g_enableHandheldEffect) {
+        ImGui::Indent();
+        ImGui::SetNextItemWidth(150);
+        ImGui::SliderFloat("Shake Intensity##shake", &g_handheldIntensity, 0.0f, 1.0f, "%.2f");
         if (ImGui::IsItemHovered()) {
-            ImGui::SetTooltip("Update the selected keyframe with current camera position");
+            ImGui::SetTooltip("Amount of camera shake (0 = none, 1 = maximum)");
         }
-        
-        ImGui::Spacing();
-        ImGui::Separator();
-        ImGui::Text("Keyframes (%zu):", g_editingPath.keyframes.size());
-        
-        // Keyframe list
-        for (size_t i = 0; i < g_editingPath.keyframes.size(); ++i) {
-            ImGui::PushID(static_cast<int>(i + 1000));
-            
-            CameraKeyframe& kf = g_editingPath.keyframes[i];
-            bool isEditing = (g_editingKeyframeIndex == static_cast<int>(i));
-            
-            char label[32];
-            snprintf(label, sizeof(label), "KF %zu (%.1fs)", i + 1, kf.time);
-            
-            if (ImGui::Selectable(label, isEditing, 0, ImVec2(100, 0))) {
-                g_editingKeyframeIndex = static_cast<int>(i);
-            }
-            
-            ImGui::SameLine();
-            if (ImGui::SmallButton("-")) {
-                g_editingPath.keyframes.erase(g_editingPath.keyframes.begin() + static_cast<std::ptrdiff_t>(i));
-                if (g_editingKeyframeIndex == static_cast<int>(i)) {
-                    g_editingKeyframeIndex = -1;
-                }
-            }
-            
-            ImGui::PopID();
-        }
-        
-        // Add keyframe button
-        if (ImGui::SmallButton("+ Add Keyframe")) {
-            CameraKeyframe newKf;
-            if (!g_editingPath.keyframes.empty()) {
-                newKf = g_editingPath.keyframes.back();
-                newKf.time += 2.0f;
-            } else {
-                newKf = {0.0f, 0.0f, 10.0f, -30.0f, 10.0f, 180.0f, 0.0f, 1.0f, 50.0f, 2.8f};
-            }
-            g_editingPath.keyframes.push_back(newKf);
-            g_editingKeyframeIndex = static_cast<int>(g_editingPath.keyframes.size()) - 1;
-        }
-        
-        // Keyframe editor
-        if (g_editingKeyframeIndex >= 0 && g_editingKeyframeIndex < static_cast<int>(g_editingPath.keyframes.size())) {
-            ImGui::Spacing();
-            ImGui::Text("Edit Keyframe %d:", g_editingKeyframeIndex + 1);
-            
-            CameraKeyframe& kf = g_editingPath.keyframes[g_editingKeyframeIndex];
-            
-            ImGui::SetNextItemWidth(60);
-            ImGui::InputFloat("Time (s)", &kf.time, 0.5f, 1.0f, "%.1f");
-            
-            ImGui::Text("Position:");
-            ImGui::SetNextItemWidth(60);
-            ImGui::InputFloat("X", &kf.x, 1.0f, 5.0f, "%.1f");
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(60);
-            ImGui::InputFloat("Y", &kf.y, 1.0f, 5.0f, "%.1f");
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(60);
-            ImGui::InputFloat("Z", &kf.z, 1.0f, 5.0f, "%.1f");
-            
-            ImGui::Text("Rotation:");
-            ImGui::SetNextItemWidth(60);
-            ImGui::InputFloat("Pitch", &kf.pitch, 1.0f, 5.0f, "%.1f");
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(60);
-            ImGui::InputFloat("Heading", &kf.heading, 5.0f, 15.0f, "%.1f");
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(60);
-            ImGui::InputFloat("Roll", &kf.roll, 1.0f, 5.0f, "%.1f");
-            
-            ImGui::Text("Camera:");
-            ImGui::SetNextItemWidth(60);
-            ImGui::InputFloat("Zoom", &kf.zoom, 0.05f, 0.1f, "%.2f");
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(60);
-            ImGui::InputFloat("Focal (mm)", &kf.focalLength, 5.0f, 10.0f, "%.0f");
-            ImGui::SameLine();
-            ImGui::SetNextItemWidth(60);
-            ImGui::InputFloat("f/", &kf.aperture, 0.5f, 1.0f, "%.1f");
-        }
-        
-        ImGui::Spacing();
-        
-        // Save/Cancel buttons
-        if (ImGui::Button("Save Path", ImVec2(80, 0))) {
-            g_editingPath.name = g_pathNameBuffer;
-            
-            // Check if this is an existing path or new
-            bool found = false;
-            for (auto& path : g_customPaths) {
-                if (path.name == g_editingPath.name) {
-                    path = g_editingPath;
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) {
-                g_customPaths.push_back(g_editingPath);
-            }
-            
-            SaveCustomPaths();
-            g_pathEditorOpen = false;
-        }
-        
-        ImGui::SameLine();
-        if (ImGui::Button("Cancel", ImVec2(80, 0))) {
-            g_pathEditorOpen = false;
-        }
-        
-        ImGui::SameLine();
-        if (ImGui::Button("Preview", ImVec2(80, 0))) {
-            // Find or add this path temporarily for preview
-            bool found = false;
-            for (size_t i = 0; i < g_customPaths.size(); ++i) {
-                if (g_customPaths[i].name == g_editingPath.name) {
-                    g_customPaths[i] = g_editingPath;
-                    g_currentCustomPathIndex = static_cast<int>(i);
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) {
-                g_customPaths.push_back(g_editingPath);
-                g_currentCustomPathIndex = static_cast<int>(g_customPaths.size()) - 1;
-            }
-            
-            g_usingCustomPath = true;
-            g_customPathTime = 0.0f;
-            if (!g_functionActive) {
-                StartCameraControl();
-            }
-        }
+        ImGui::Unindent();
+    }
+    
+    // G-Force Camera Effect (Internal views)
+    ImGui::Checkbox("Enable G-Force Effect", &g_enableGForceEffect);
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Enable G-force camera movement for internal views");
     }
     
     ImGui::Spacing();
@@ -731,133 +460,11 @@ void SettingsWindow::buildInterface() {
 }
 
 /**
- * Initialize predefined camera shots with cinematic movement
- * Each shot includes drift parameters for smooth multi-axis camera motion
- */
-static void InitializeCameraShots() {
-    // Cockpit shots - various instrument views and pilot perspective shots
-    // Drift values create slow, cinematic camera movements
-    // For cockpit: subtle position/rotation drift + zoom breathing for DOF effect
-    g_cockpitShots.clear();
-    
-    // Center panel view - slow zoom in with slight drift
-    // x, y, z, pitch, heading, roll, zoom, duration, name, driftX, driftY, driftZ, driftPitch, driftHeading, driftRoll, driftZoom
-    g_cockpitShots.push_back({CameraType::Cockpit, 0.0f, 0.15f, 0.4f, -8.0f, 0.0f, 0.0f, 1.0f, 8.0f, "Center Panel",
-                              0.0f, 0.01f, 0.02f, 0.2f, 0.0f, 0.0f, 0.03f});
-    
-    // Left panel (throttle/navigation) - gentle pan right with zoom
-    g_cockpitShots.push_back({CameraType::Cockpit, -0.25f, 0.1f, 0.3f, -12.0f, -25.0f, 0.0f, 1.2f, 7.0f, "Left Panel",
-                              0.01f, 0.0f, 0.01f, 0.15f, 1.0f, 0.0f, 0.025f});
-    
-    // Right panel (radios/autopilot) - gentle pan left with zoom
-    g_cockpitShots.push_back({CameraType::Cockpit, 0.25f, 0.1f, 0.3f, -12.0f, 25.0f, 0.0f, 1.2f, 7.0f, "Right Panel",
-                              -0.01f, 0.0f, 0.01f, 0.15f, -1.0f, 0.0f, 0.025f});
-    
-    // Overhead panel view - slow tilt down
-    g_cockpitShots.push_back({CameraType::Cockpit, 0.0f, 0.35f, 0.15f, -55.0f, 0.0f, 0.0f, 1.1f, 6.0f, "Overhead Panel",
-                              0.0f, -0.01f, 0.01f, 1.5f, 0.0f, 0.0f, 0.02f});
-    
-    // PFD closeup - slow zoom with subtle drift
-    g_cockpitShots.push_back({CameraType::Cockpit, -0.12f, 0.05f, 0.45f, -3.0f, -8.0f, 0.0f, 1.6f, 8.0f, "PFD View",
-                              0.005f, 0.005f, 0.015f, 0.1f, 0.3f, 0.0f, 0.04f});
-    
-    // ND/MFD view - slow zoom with subtle drift  
-    g_cockpitShots.push_back({CameraType::Cockpit, 0.12f, 0.05f, 0.45f, -3.0f, 8.0f, 0.0f, 1.6f, 8.0f, "ND/MFD View",
-                              -0.005f, 0.005f, 0.015f, 0.1f, -0.3f, 0.0f, 0.04f});
-    
-    // Pilot's eye view looking out - subtle look around
-    g_cockpitShots.push_back({CameraType::Cockpit, -0.1f, 0.25f, -0.1f, 3.0f, 5.0f, 0.0f, 0.9f, 10.0f, "Pilot View",
-                              0.005f, 0.0f, 0.0f, 0.0f, 0.8f, 0.0f, 0.0f});
-    
-    // Co-pilot perspective - looking at captain's side
-    g_cockpitShots.push_back({CameraType::Cockpit, 0.35f, 0.2f, 0.0f, 0.0f, -20.0f, 0.0f, 0.95f, 8.0f, "Copilot View",
-                              -0.01f, 0.0f, 0.0f, 0.0f, 0.5f, 0.0f, 0.01f});
-    
-    // Looking out left window - slow pan
-    g_cockpitShots.push_back({CameraType::Cockpit, -0.35f, 0.15f, 0.0f, 2.0f, -75.0f, 0.0f, 0.85f, 9.0f, "Left Window",
-                              0.0f, 0.01f, 0.0f, -0.3f, 2.0f, 0.0f, 0.0f});
-    
-    // Looking out right window - slow pan
-    g_cockpitShots.push_back({CameraType::Cockpit, 0.35f, 0.15f, 0.0f, 2.0f, 75.0f, 0.0f, 0.85f, 9.0f, "Right Window",
-                              0.0f, 0.01f, 0.0f, -0.3f, -2.0f, 0.0f, 0.0f});
-    
-    // Pedestal/center console view
-    g_cockpitShots.push_back({CameraType::Cockpit, 0.0f, 0.0f, 0.35f, -35.0f, 0.0f, 0.0f, 1.4f, 6.0f, "Pedestal View",
-                              0.0f, 0.01f, 0.01f, 0.5f, 0.0f, 0.0f, 0.03f});
-    
-    // External shots - various external angles with cinematic movement
-    // External shots have more pronounced position drift for dynamic feel
-    // Positions are offset away from aircraft center to avoid clipping
-    g_externalShots.clear();
-    
-    // Front hero shot - positioned further out and slightly offset
-    g_externalShots.push_back({CameraType::External, 5.0f, 8.0f, -55.0f, 10.0f, 175.0f, 0.0f, 0.85f, 10.0f, "Front Hero",
-                               -0.1f, 0.12f, 0.25f, -0.25f, 0.3f, 0.0f, 0.01f});
-    
-    // Rear chase - elevated and further back, offset to side
-    g_externalShots.push_back({CameraType::External, -8.0f, 12.0f, 65.0f, 15.0f, 8.0f, 0.0f, 0.8f, 10.0f, "Rear Chase",
-                               0.15f, 0.08f, -0.18f, -0.15f, -0.4f, 0.0f, 0.0f});
-    
-    // Left flyby - further out to side, more dramatic sweep
-    g_externalShots.push_back({CameraType::External, -50.0f, 5.0f, 15.0f, 5.0f, 82.0f, 2.0f, 0.85f, 12.0f, "Left Flyby",
-                               0.5f, 0.1f, -0.6f, 0.0f, 1.0f, -0.1f, 0.0f});
-    
-    // Right flyby - further out to side, more dramatic sweep
-    g_externalShots.push_back({CameraType::External, 50.0f, 5.0f, 15.0f, 5.0f, -82.0f, -2.0f, 0.85f, 12.0f, "Right Flyby",
-                               -0.5f, 0.1f, -0.6f, 0.0f, -1.0f, 0.1f, 0.0f});
-    
-    // High orbit - high above and further back for wide view
-    g_externalShots.push_back({CameraType::External, 15.0f, 55.0f, 35.0f, 62.0f, -15.0f, 0.0f, 0.75f, 15.0f, "High Orbit",
-                               -0.3f, 0.03f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f});
-    
-    // Low angle front - below and forward, offset to avoid fuselage
-    g_externalShots.push_back({CameraType::External, 12.0f, -12.0f, -40.0f, -22.0f, 170.0f, 3.0f, 0.9f, 8.0f, "Low Angle Front",
-                               -0.1f, 0.15f, 0.2f, 0.4f, 0.5f, -0.2f, 0.0f});
-    
-    // Quarter front left - wide angle approach shot
-    g_externalShots.push_back({CameraType::External, -40.0f, 12.0f, -40.0f, 14.0f, 135.0f, -1.0f, 0.82f, 10.0f, "Quarter FL",
-                               0.25f, 0.06f, 0.3f, -0.12f, -0.8f, 0.05f, 0.0f});
-    
-    // Quarter front right - wide angle approach shot
-    g_externalShots.push_back({CameraType::External, 40.0f, 12.0f, -40.0f, 14.0f, -135.0f, 1.0f, 0.82f, 10.0f, "Quarter FR",
-                               -0.25f, 0.06f, 0.3f, -0.12f, 0.8f, -0.05f, 0.0f});
-    
-    // Quarter rear left - elevated departure shot
-    g_externalShots.push_back({CameraType::External, -35.0f, 18.0f, 50.0f, 20.0f, 45.0f, 2.0f, 0.8f, 10.0f, "Quarter RL",
-                               0.2f, 0.04f, -0.2f, -0.18f, -0.6f, -0.1f, 0.0f});
-    
-    // Quarter rear right - elevated departure shot  
-    g_externalShots.push_back({CameraType::External, 35.0f, 18.0f, 50.0f, 20.0f, -45.0f, -2.0f, 0.8f, 10.0f, "Quarter RR",
-                               -0.2f, 0.04f, -0.2f, -0.18f, 0.6f, 0.1f, 0.0f});
-    
-    // Wing tip left - close wing view with offset
-    g_externalShots.push_back({CameraType::External, -28.0f, 5.0f, 8.0f, 10.0f, 60.0f, -3.0f, 1.0f, 8.0f, "Wing Left",
-                               0.1f, 0.04f, -0.12f, 0.0f, 0.6f, 0.15f, 0.0f});
-    
-    // Wing tip right - close wing view with offset
-    g_externalShots.push_back({CameraType::External, 28.0f, 5.0f, 8.0f, 10.0f, -60.0f, 3.0f, 1.0f, 8.0f, "Wing Right",
-                               -0.1f, 0.04f, -0.12f, 0.0f, -0.6f, -0.15f, 0.0f});
-    
-    // Engine close-up left - positioned to see engine from outside
-    g_externalShots.push_back({CameraType::External, -20.0f, 2.0f, -5.0f, 8.0f, 75.0f, 0.0f, 1.2f, 7.0f, "Engine L",
-                               0.06f, 0.03f, -0.1f, 0.0f, 0.4f, 0.0f, 0.0f});
-    
-    // Engine close-up right - positioned to see engine from outside
-    g_externalShots.push_back({CameraType::External, 20.0f, 2.0f, -5.0f, 8.0f, -75.0f, 0.0f, 1.2f, 7.0f, "Engine R",
-                               -0.06f, 0.03f, -0.1f, 0.0f, -0.4f, 0.0f, 0.0f});
-    
-    // Tail view - looking at tail from behind and above
-    g_externalShots.push_back({CameraType::External, -10.0f, 15.0f, 70.0f, 28.0f, 10.0f, 0.0f, 0.85f, 9.0f, "Tail View",
-                               0.1f, 0.06f, -0.12f, -0.25f, -0.6f, 0.0f, 0.0f});
-    
-    // Belly view - looking up at aircraft from below
-    g_externalShots.push_back({CameraType::External, 8.0f, -18.0f, 0.0f, -35.0f, -5.0f, 0.0f, 0.9f, 8.0f, "Belly View",
-                               -0.05f, 0.08f, 0.0f, 0.3f, 0.4f, 0.0f, 0.0f});
-}
-
-/**
  * Read aircraft dimensions from X-Plane datarefs
- * This reads data that X-Plane has loaded from the .acf file
+ * Uses multiple data sources for best accuracy:
+ * 1. acf_size_x/z - Shadow and viewing distance (most reliable for overall size)
+ * 2. acf_semilen_SEG/JND - Wing segment semi-lengths for accurate wingspan
+ * 3. CG limits and pilot eye position - for fuselage length estimation
  */
 static void ReadAircraftDimensions() {
     // Set defaults first
@@ -868,27 +475,88 @@ static void ReadAircraftDimensions() {
     if (g_drAcfPeY) g_aircraftDims.pilotEyeY = XPLMGetDataf(g_drAcfPeY);
     if (g_drAcfPeZ) g_aircraftDims.pilotEyeZ = XPLMGetDataf(g_drAcfPeZ);
     
-    // Read CG limits to estimate fuselage length
-    // The CG forward and aft limits give us a rough indication of aircraft length
-    float cgZFwd = 0.0f, cgZAft = 0.0f;
-    if (g_drAcfCgZFwd) cgZFwd = XPLMGetDataf(g_drAcfCgZFwd);
-    if (g_drAcfCgZAft) cgZAft = XPLMGetDataf(g_drAcfCgZAft);
+    // ========================================
+    // Method 1: Use acf_size_x for wingspan (most reliable)
+    // This is the shadow/viewing distance size set in Plane Maker
+    // ========================================
+    if (g_drAcfSizeX) {
+        float sizeX = XPLMGetDataf(g_drAcfSizeX);
+        if (sizeX > 5.0f) {  // Reasonable minimum wingspan
+            g_aircraftDims.wingspan = sizeX;
+            char msg[128];
+            snprintf(msg, sizeof(msg), "MovieCamera: Using acf_size_x for wingspan: %.1fm\n", sizeX);
+            XPLMDebugString(msg);
+        }
+    }
     
-    // Calculate fuselage length from CG range
-    if (cgZFwd != 0.0f || cgZAft != 0.0f) {
-        float cgRange = std::abs(cgZAft - cgZFwd);
-        if (cgRange > MIN_VALID_CG_RANGE) {
-            g_aircraftDims.fuselageLength = cgRange * CG_TO_FUSELAGE_MULTIPLIER;
+    // ========================================
+    // Method 2: Use acf_semilen for more precise wingspan calculation
+    // Sum the maximum semi-lengths from each wing segment
+    // ========================================
+    if (g_drAcfSemilenJND) {
+        float semilenData[56];
+        int count = XPLMGetDatavf(g_drAcfSemilenJND, semilenData, 0, 56);
+        if (count > 0) {
+            float maxSemilen = 0.0f;
+            for (int i = 0; i < count; i++) {
+                if (semilenData[i] > maxSemilen) {
+                    maxSemilen = semilenData[i];
+                }
+            }
+            if (maxSemilen > 2.0f) {  // Minimum reasonable semi-span
+                float wingspan = maxSemilen * 2.0f;  // Full span = 2 * semi-span
+                // Only use if significantly different from size_x (could be more accurate)
+                if (wingspan > g_aircraftDims.wingspan * 0.8f && wingspan < g_aircraftDims.wingspan * 1.5f) {
+                    // Values are close, prefer the larger one
+                    if (wingspan > g_aircraftDims.wingspan) {
+                        g_aircraftDims.wingspan = wingspan;
+                    }
+                } else if (g_aircraftDims.wingspan < MIN_WINGSPAN) {
+                    // size_x didn't work, use semilen
+                    g_aircraftDims.wingspan = wingspan;
+                }
+                char msg[128];
+                snprintf(msg, sizeof(msg), "MovieCamera: Wing semilen max: %.1fm, calculated wingspan: %.1fm\n", maxSemilen, wingspan);
+                XPLMDebugString(msg);
+            }
+        }
+    }
+    
+    // ========================================
+    // Method 3: Use acf_size_z for fuselage length (most reliable)
+    // ========================================
+    if (g_drAcfSizeZ) {
+        float sizeZ = XPLMGetDataf(g_drAcfSizeZ);
+        if (sizeZ > 5.0f) {  // Reasonable minimum length
+            g_aircraftDims.fuselageLength = sizeZ;
+            char msg[128];
+            snprintf(msg, sizeof(msg), "MovieCamera: Using acf_size_z for fuselage length: %.1fm\n", sizeZ);
+            XPLMDebugString(msg);
+        }
+    }
+    
+    // Fallback: Use CG limits if size_z didn't work
+    if (g_aircraftDims.fuselageLength < MIN_FUSELAGE_LENGTH + 1.0f) {
+        float cgZFwd = 0.0f, cgZAft = 0.0f;
+        if (g_drAcfCgZFwd) cgZFwd = XPLMGetDataf(g_drAcfCgZFwd);
+        if (g_drAcfCgZAft) cgZAft = XPLMGetDataf(g_drAcfCgZAft);
+        
+        if (cgZFwd != 0.0f || cgZAft != 0.0f) {
+            float cgRange = std::abs(cgZAft - cgZFwd);
+            if (cgRange > MIN_VALID_CG_RANGE) {
+                g_aircraftDims.fuselageLength = cgRange * CG_TO_FUSELAGE_MULTIPLIER;
+            }
         }
     }
     
     // Alternative: Use pilot eye Z position to estimate aircraft size
-    // This is used if CG-based estimation didn't provide a valid result
     if (g_aircraftDims.pilotEyeZ != 0.0f && g_aircraftDims.fuselageLength < MIN_FUSELAGE_LENGTH + 1.0f) {
         g_aircraftDims.fuselageLength = std::abs(g_aircraftDims.pilotEyeZ) * PILOT_Z_TO_FUSELAGE_MULTIPLIER;
     }
     
-    // Read height from gear Y position if available, otherwise use pilot eye
+    // ========================================
+    // Height estimation
+    // ========================================
     float minY = 0.0f;
     if (g_drAcfMinY) minY = XPLMGetDataf(g_drAcfMinY);
     
@@ -900,15 +568,9 @@ static void ReadAircraftDimensions() {
         g_aircraftDims.height = g_aircraftDims.pilotEyeY * PILOT_Y_TO_HEIGHT_MULTIPLIER + ESTIMATED_GROUND_CLEARANCE;
     }
     
-    // Read wingspan if available
-    if (g_drAcfWingSpan) {
-        float span = XPLMGetDataf(g_drAcfWingSpan);
-        if (span > 0.0f) {
-            g_aircraftDims.wingspan = span;
-        }
-    }
-    
-    // Validate and constrain dimensions to reasonable values using named constants
+    // ========================================
+    // Validate and constrain dimensions
+    // ========================================
     if (g_aircraftDims.wingspan < MIN_WINGSPAN) g_aircraftDims.wingspan = STANDARD_WINGSPAN;
     if (g_aircraftDims.wingspan > MAX_WINGSPAN) g_aircraftDims.wingspan = MAX_WINGSPAN;
     if (g_aircraftDims.fuselageLength < MIN_FUSELAGE_LENGTH) g_aircraftDims.fuselageLength = STANDARD_FUSELAGE_LENGTH;
@@ -917,7 +579,7 @@ static void ReadAircraftDimensions() {
     if (g_aircraftDims.height > MAX_HEIGHT) g_aircraftDims.height = MAX_HEIGHT;
     
     char msg[256];
-    snprintf(msg, sizeof(msg), "MovieCamera: Aircraft dims - Wingspan: %.1fm, Length: %.1fm, Height: %.1fm, PilotEye: (%.1f, %.1f, %.1f)\n",
+    snprintf(msg, sizeof(msg), "MovieCamera: Final aircraft dims - Wingspan: %.1fm, Length: %.1fm, Height: %.1fm, PilotEye: (%.1f, %.1f, %.1f)\n",
              g_aircraftDims.wingspan, g_aircraftDims.fuselageLength, g_aircraftDims.height,
              g_aircraftDims.pilotEyeX, g_aircraftDims.pilotEyeY, g_aircraftDims.pilotEyeZ);
     XPLMDebugString(msg);
@@ -964,6 +626,13 @@ static float CalculateIntelligentZoom(float baseZoom, float cameraDistance) {
 /**
  * Generate dynamic camera shots based on aircraft dimensions
  * This calculates camera positions relative to the aircraft's actual size
+ * 
+ * Camera positioning principles:
+ * 1. External shots are positioned based on aircraft size (wingspan, fuselage length, height)
+ * 2. Camera should never clip into the aircraft model
+ * 3. Each shot provides a visually distinct perspective
+ * 4. Zoom levels are calculated to keep aircraft well-framed
+ * 5. Drift amounts create smooth, cinematic camera movement
  */
 static void GenerateDynamicCameraShots() {
     // Get scale factor based on aircraft size
@@ -978,206 +647,228 @@ static void GenerateDynamicCameraShots() {
     
     // =====================================================
     // COCKPIT SHOTS - These are relative to pilot eye position
-    // Scale cockpit movements slightly for larger cockpits
+    // Scale cockpit movements based on cockpit size estimation
     // =====================================================
     float cockpitScale = std::sqrt(scale);  // Use sqrt for subtler scaling in cockpit
     
-    // Center panel view - slow zoom in with slight drift
-    g_cockpitShots.push_back({CameraType::Cockpit, 0.0f, 0.15f * cockpitScale, 0.4f * cockpitScale,
-                              -8.0f, 0.0f, 0.0f, 1.0f, 8.0f, "Center Panel",
-                              0.0f, 0.01f, 0.02f, 0.2f, 0.0f, 0.0f, 0.03f});
+    // Center panel view - main instrument scan position
+    g_cockpitShots.push_back({CameraType::Cockpit, 0.0f, 0.12f * cockpitScale, 0.35f * cockpitScale,
+                              -10.0f, 0.0f, 0.0f, 1.0f, 9.0f, "Center Panel",
+                              0.0f, 0.008f, 0.015f, 0.15f, 0.0f, 0.0f, 0.025f});
     
-    // Left panel (throttle/navigation) - gentle pan right with zoom
-    g_cockpitShots.push_back({CameraType::Cockpit, -0.25f * cockpitScale, 0.1f * cockpitScale, 0.3f * cockpitScale,
-                              -12.0f, -25.0f, 0.0f, 1.2f, 7.0f, "Left Panel",
-                              0.01f, 0.0f, 0.01f, 0.15f, 1.0f, 0.0f, 0.025f});
+    // Left panel - throttle quadrant area
+    g_cockpitShots.push_back({CameraType::Cockpit, -0.22f * cockpitScale, 0.08f * cockpitScale, 0.25f * cockpitScale,
+                              -15.0f, -30.0f, 0.0f, 1.15f, 8.0f, "Left Panel",
+                              0.008f, 0.0f, 0.01f, 0.12f, 0.8f, 0.0f, 0.02f});
     
-    // Right panel (radios/autopilot) - gentle pan left with zoom
-    g_cockpitShots.push_back({CameraType::Cockpit, 0.25f * cockpitScale, 0.1f * cockpitScale, 0.3f * cockpitScale,
-                              -12.0f, 25.0f, 0.0f, 1.2f, 7.0f, "Right Panel",
-                              -0.01f, 0.0f, 0.01f, 0.15f, -1.0f, 0.0f, 0.025f});
+    // Right panel - radio/FMS area
+    g_cockpitShots.push_back({CameraType::Cockpit, 0.22f * cockpitScale, 0.08f * cockpitScale, 0.25f * cockpitScale,
+                              -15.0f, 30.0f, 0.0f, 1.15f, 8.0f, "Right Panel",
+                              -0.008f, 0.0f, 0.01f, 0.12f, -0.8f, 0.0f, 0.02f});
     
-    // Overhead panel view - slow tilt down
-    g_cockpitShots.push_back({CameraType::Cockpit, 0.0f, 0.35f * cockpitScale, 0.15f * cockpitScale,
-                              -55.0f, 0.0f, 0.0f, 1.1f, 6.0f, "Overhead Panel",
-                              0.0f, -0.01f, 0.01f, 1.5f, 0.0f, 0.0f, 0.02f});
+    // Overhead panel - looking up at switches
+    g_cockpitShots.push_back({CameraType::Cockpit, 0.0f, 0.30f * cockpitScale, 0.12f * cockpitScale,
+                              -50.0f, 0.0f, 0.0f, 1.05f, 7.0f, "Overhead Panel",
+                              0.0f, -0.008f, 0.008f, 1.2f, 0.0f, 0.0f, 0.015f});
     
-    // PFD closeup - slow zoom with subtle drift
-    g_cockpitShots.push_back({CameraType::Cockpit, -0.12f * cockpitScale, 0.05f * cockpitScale, 0.45f * cockpitScale,
-                              -3.0f, -8.0f, 0.0f, 1.6f, 8.0f, "PFD View",
-                              0.005f, 0.005f, 0.015f, 0.1f, 0.3f, 0.0f, 0.04f});
+    // PFD closeup - primary flight display focus
+    g_cockpitShots.push_back({CameraType::Cockpit, -0.10f * cockpitScale, 0.04f * cockpitScale, 0.40f * cockpitScale,
+                              -5.0f, -10.0f, 0.0f, 1.5f, 9.0f, "PFD View",
+                              0.004f, 0.004f, 0.012f, 0.08f, 0.25f, 0.0f, 0.035f});
     
-    // ND/MFD view - slow zoom with subtle drift  
-    g_cockpitShots.push_back({CameraType::Cockpit, 0.12f * cockpitScale, 0.05f * cockpitScale, 0.45f * cockpitScale,
-                              -3.0f, 8.0f, 0.0f, 1.6f, 8.0f, "ND/MFD View",
-                              -0.005f, 0.005f, 0.015f, 0.1f, -0.3f, 0.0f, 0.04f});
+    // ND/MFD view - navigation display focus
+    g_cockpitShots.push_back({CameraType::Cockpit, 0.10f * cockpitScale, 0.04f * cockpitScale, 0.40f * cockpitScale,
+                              -5.0f, 10.0f, 0.0f, 1.5f, 9.0f, "ND View",
+                              -0.004f, 0.004f, 0.012f, 0.08f, -0.25f, 0.0f, 0.035f});
     
-    // Pilot's eye view looking out - subtle look around
-    g_cockpitShots.push_back({CameraType::Cockpit, -0.1f * cockpitScale, 0.25f * cockpitScale, -0.1f * cockpitScale,
-                              3.0f, 5.0f, 0.0f, 0.9f, 10.0f, "Pilot View",
-                              0.005f, 0.0f, 0.0f, 0.0f, 0.8f, 0.0f, 0.0f});
+    // Pilot forward view - looking out windscreen
+    g_cockpitShots.push_back({CameraType::Cockpit, -0.08f * cockpitScale, 0.20f * cockpitScale, -0.08f * cockpitScale,
+                              5.0f, 3.0f, 0.0f, 0.85f, 11.0f, "Pilot View",
+                              0.004f, 0.0f, 0.0f, 0.0f, 0.6f, 0.0f, 0.0f});
     
-    // Co-pilot perspective - looking at captain's side
-    g_cockpitShots.push_back({CameraType::Cockpit, 0.35f * cockpitScale, 0.2f * cockpitScale, 0.0f,
-                              0.0f, -20.0f, 0.0f, 0.95f, 8.0f, "Copilot View",
-                              -0.01f, 0.0f, 0.0f, 0.0f, 0.5f, 0.0f, 0.01f});
+    // Co-pilot perspective
+    g_cockpitShots.push_back({CameraType::Cockpit, 0.30f * cockpitScale, 0.18f * cockpitScale, 0.0f,
+                              2.0f, -15.0f, 0.0f, 0.90f, 9.0f, "Copilot View",
+                              -0.008f, 0.0f, 0.0f, 0.0f, 0.4f, 0.0f, 0.008f});
     
-    // Looking out left window - slow pan
-    g_cockpitShots.push_back({CameraType::Cockpit, -0.35f * cockpitScale, 0.15f * cockpitScale, 0.0f,
-                              2.0f, -75.0f, 0.0f, 0.85f, 9.0f, "Left Window",
-                              0.0f, 0.01f, 0.0f, -0.3f, 2.0f, 0.0f, 0.0f});
+    // Left window view - scenic exterior
+    g_cockpitShots.push_back({CameraType::Cockpit, -0.30f * cockpitScale, 0.12f * cockpitScale, 0.0f,
+                              5.0f, -80.0f, 0.0f, 0.80f, 10.0f, "Left Window",
+                              0.0f, 0.008f, 0.0f, -0.2f, 1.5f, 0.0f, 0.0f});
     
-    // Looking out right window - slow pan
-    g_cockpitShots.push_back({CameraType::Cockpit, 0.35f * cockpitScale, 0.15f * cockpitScale, 0.0f,
-                              2.0f, 75.0f, 0.0f, 0.85f, 9.0f, "Right Window",
-                              0.0f, 0.01f, 0.0f, -0.3f, -2.0f, 0.0f, 0.0f});
+    // Right window view - scenic exterior
+    g_cockpitShots.push_back({CameraType::Cockpit, 0.30f * cockpitScale, 0.12f * cockpitScale, 0.0f,
+                              5.0f, 80.0f, 0.0f, 0.80f, 10.0f, "Right Window",
+                              0.0f, 0.008f, 0.0f, -0.2f, -1.5f, 0.0f, 0.0f});
     
-    // Pedestal/center console view
-    g_cockpitShots.push_back({CameraType::Cockpit, 0.0f, 0.0f, 0.35f * cockpitScale,
-                              -35.0f, 0.0f, 0.0f, 1.4f, 6.0f, "Pedestal View",
-                              0.0f, 0.01f, 0.01f, 0.5f, 0.0f, 0.0f, 0.03f});
+    // Pedestal/center console view - MCDU/throttles
+    g_cockpitShots.push_back({CameraType::Cockpit, 0.0f, -0.05f * cockpitScale, 0.30f * cockpitScale,
+                              -40.0f, 0.0f, 0.0f, 1.3f, 7.0f, "Pedestal View",
+                              0.0f, 0.008f, 0.008f, 0.4f, 0.0f, 0.0f, 0.025f});
     
     // =====================================================
     // EXTERNAL SHOTS - Scaled based on aircraft dimensions
-    // These need to be far enough from aircraft to avoid clipping
+    // Positioning uses aircraft dimensions as reference
     // =====================================================
     
-    // Calculate base distances based on aircraft size
-    // Ensure minimum distance for aircraft visibility
+    // Calculate safe distances based on aircraft size
     float minVisibleDist = CalculateMinVisibleDistance();
-    float frontDist = std::max(fuselageLen * 1.2f, minVisibleDist);      // Distance in front of aircraft
-    float rearDist = std::max(fuselageLen * 1.5f, minVisibleDist);       // Distance behind aircraft
-    float sideDist = std::max(wingspan * 1.3f, minVisibleDist);          // Distance to side
-    float highDist = std::max(height * 4.0f, minVisibleDist);            // High altitude distance
-    float closeDist = std::max(wingspan * CLOSE_DISTANCE_SCALE, minVisibleDist * CLOSE_DISTANCE_SCALE);  // Close-up distance
     
-    // Drift amounts scale with aircraft size
-    float driftScale = scale * 0.5f + 0.5f;    // 0.5 to 1.5x based on size
+    // Base distances proportional to aircraft dimensions
+    float frontDist = std::max(fuselageLen * 1.4f, minVisibleDist);       // Front shots
+    float rearDist = std::max(fuselageLen * 1.6f, minVisibleDist);        // Rear shots
+    float sideDist = std::max(wingspan * 1.5f, minVisibleDist);           // Side shots
+    float highDist = std::max(wingspan * 2.0f, minVisibleDist);           // High altitude shots
+    float closeDist = std::max(wingspan * 0.8f, minVisibleDist * 0.8f);   // Close-up shots
+    float midDist = std::max(wingspan * 1.2f, minVisibleDist);            // Mid-range shots
     
-    // Calculate intelligent zoom for external shots based on aircraft size
-    // Larger aircraft need lower zoom (wider view) to stay in frame
-    float baseExternalZoom = CalculateIntelligentZoom(0.85f, frontDist);
-    float closeZoom = CalculateIntelligentZoom(1.0f, closeDist);
-    float wideZoom = CalculateIntelligentZoom(0.75f, highDist);
+    // Drift amounts scale with aircraft size (larger aircraft = slower perceived drift)
+    float driftScale = 0.7f + scale * 0.3f;
     
-    // Note: All Y positions are in aircraft-relative coordinates.
-    // Ground collision prevention is applied in world-space during camera callback,
-    // not here in the shot definitions.
+    // Calculate intelligent zoom for external shots
+    float baseZoom = CalculateIntelligentZoom(0.80f, midDist);
+    float closeZoom = CalculateIntelligentZoom(0.95f, closeDist);
+    float wideZoom = CalculateIntelligentZoom(0.65f, highDist);
+    float frontZoom = CalculateIntelligentZoom(0.85f, frontDist);
     
-    // Front hero shot - positioned further out and slightly offset
+    // ---- HERO SHOTS (Dramatic main angles) ----
+    
+    // Front Hero - Classic nose-on shot, slightly elevated
     g_externalShots.push_back({CameraType::External,
-                               5.0f * scale, height * 0.7f, -frontDist,
-                               10.0f, 175.0f, 0.0f, baseExternalZoom, 10.0f, "Front Hero",
-                               -0.1f * driftScale, 0.12f * driftScale, 0.25f * driftScale,
-                               -0.25f, 0.3f, 0.0f, 0.01f});
+                               wingspan * 0.12f, height * 0.8f, -frontDist,
+                               8.0f, 178.0f, 0.0f, frontZoom, 11.0f, "Front Hero",
+                               -0.08f * driftScale, 0.10f * driftScale, 0.20f * driftScale,
+                               -0.20f, 0.25f, 0.0f, 0.008f});
     
-    // Rear chase - elevated and further back, offset to side
+    // Rear Chase - Following shot from behind
     g_externalShots.push_back({CameraType::External,
-                               -8.0f * scale, height * 1.0f, rearDist,
-                               15.0f, 8.0f, 0.0f, baseExternalZoom * 0.95f, 10.0f, "Rear Chase",
-                               0.15f * driftScale, 0.08f * driftScale, -0.18f * driftScale,
-                               -0.15f, -0.4f, 0.0f, 0.0f});
+                               -wingspan * 0.15f, height * 1.1f, rearDist,
+                               12.0f, 5.0f, 0.0f, baseZoom, 12.0f, "Rear Chase",
+                               0.12f * driftScale, 0.06f * driftScale, -0.15f * driftScale,
+                               -0.12f, -0.30f, 0.0f, 0.0f});
     
-    // Left flyby - further out to side, more dramatic sweep
+    // High Wide - Establishing shot from above
     g_externalShots.push_back({CameraType::External,
-                               -sideDist, height * 0.4f, fuselageLen * 0.4f,
-                               5.0f, 82.0f, 2.0f, baseExternalZoom, 12.0f, "Left Flyby",
-                               0.5f * driftScale, 0.1f * driftScale, -0.6f * driftScale,
-                               0.0f, 1.0f, -0.1f, 0.0f});
+                               wingspan * 0.3f, highDist * 1.5f, fuselageLen * 0.5f,
+                               55.0f, -20.0f, 0.0f, wideZoom, 14.0f, "High Wide",
+                               -0.25f * driftScale, 0.02f * driftScale, 0.0f,
+                               0.0f, 1.8f, 0.0f, 0.0f});
     
-    // Right flyby - further out to side, more dramatic sweep
-    g_externalShots.push_back({CameraType::External,
-                               sideDist, height * 0.4f, fuselageLen * 0.4f,
-                               5.0f, -82.0f, -2.0f, baseExternalZoom, 12.0f, "Right Flyby",
-                               -0.5f * driftScale, 0.1f * driftScale, -0.6f * driftScale,
-                               0.0f, -1.0f, 0.1f, 0.0f});
+    // ---- FLYBY SHOTS (Side sweep angles) ----
     
-    // High orbit - high above and further back for wide view
+    // Left Flyby - Dramatic side sweep
     g_externalShots.push_back({CameraType::External,
-                               wingspan * 0.4f, highDist, fuselageLen * 0.8f,
-                               62.0f, -15.0f, 0.0f, wideZoom, 15.0f, "High Orbit",
-                               -0.3f * driftScale, 0.03f * driftScale, 0.0f,
-                               0.0f, 2.0f, 0.0f, 0.0f});
+                               -sideDist, height * 0.5f, fuselageLen * 0.3f,
+                               4.0f, 85.0f, 1.5f, baseZoom, 13.0f, "Left Flyby",
+                               0.40f * driftScale, 0.08f * driftScale, -0.50f * driftScale,
+                               0.0f, 0.8f, -0.08f, 0.0f});
     
-    // Mid-level front angle - offset forward with upward-looking pitch
+    // Right Flyby - Dramatic side sweep
     g_externalShots.push_back({CameraType::External,
-                               wingspan * 0.3f, height * 0.5f, -fuselageLen * 0.9f,
-                               -15.0f, 170.0f, 3.0f, baseExternalZoom * 1.05f, 8.0f, "Mid Angle Front",
-                               -0.1f * driftScale, 0.15f * driftScale, 0.2f * driftScale,
-                               0.4f, 0.5f, -0.2f, 0.0f});
+                               sideDist, height * 0.5f, fuselageLen * 0.3f,
+                               4.0f, -85.0f, -1.5f, baseZoom, 13.0f, "Right Flyby",
+                               -0.40f * driftScale, 0.08f * driftScale, -0.50f * driftScale,
+                               0.0f, -0.8f, 0.08f, 0.0f});
     
-    // Quarter front left - wide angle approach shot
-    g_externalShots.push_back({CameraType::External,
-                               -sideDist * 0.8f, height * 1.0f, -frontDist * 0.8f,
-                               14.0f, 135.0f, -1.0f, baseExternalZoom * 0.97f, 10.0f, "Quarter FL",
-                               0.25f * driftScale, 0.06f * driftScale, 0.3f * driftScale,
-                               -0.12f, -0.8f, 0.05f, 0.0f});
+    // ---- QUARTER ANGLE SHOTS (45-degree views) ----
     
-    // Quarter front right - wide angle approach shot
+    // Quarter Front Left - Approaching from front-left
     g_externalShots.push_back({CameraType::External,
-                               sideDist * 0.8f, height * 1.0f, -frontDist * 0.8f,
-                               14.0f, -135.0f, 1.0f, baseExternalZoom * 0.97f, 10.0f, "Quarter FR",
-                               -0.25f * driftScale, 0.06f * driftScale, 0.3f * driftScale,
-                               -0.12f, 0.8f, -0.05f, 0.0f});
+                               -midDist * 0.9f, height * 1.0f, -frontDist * 0.85f,
+                               12.0f, 140.0f, -0.5f, frontZoom * 0.95f, 11.0f, "Quarter FL",
+                               0.20f * driftScale, 0.05f * driftScale, 0.25f * driftScale,
+                               -0.10f, -0.60f, 0.04f, 0.0f});
     
-    // Quarter rear left - elevated departure shot
+    // Quarter Front Right - Approaching from front-right
     g_externalShots.push_back({CameraType::External,
-                               -sideDist * 0.7f, height * 1.5f, rearDist * 0.8f,
-                               20.0f, 45.0f, 2.0f, baseExternalZoom * 0.95f, 10.0f, "Quarter RL",
-                               0.2f * driftScale, 0.04f * driftScale, -0.2f * driftScale,
-                               -0.18f, -0.6f, -0.1f, 0.0f});
+                               midDist * 0.9f, height * 1.0f, -frontDist * 0.85f,
+                               12.0f, -140.0f, 0.5f, frontZoom * 0.95f, 11.0f, "Quarter FR",
+                               -0.20f * driftScale, 0.05f * driftScale, 0.25f * driftScale,
+                               -0.10f, 0.60f, -0.04f, 0.0f});
     
-    // Quarter rear right - elevated departure shot  
+    // Quarter Rear Left - Departure view from rear-left
     g_externalShots.push_back({CameraType::External,
-                               sideDist * 0.7f, height * 1.5f, rearDist * 0.8f,
-                               20.0f, -45.0f, -2.0f, baseExternalZoom * 0.95f, 10.0f, "Quarter RR",
-                               -0.2f * driftScale, 0.04f * driftScale, -0.2f * driftScale,
-                               -0.18f, 0.6f, 0.1f, 0.0f});
+                               -midDist * 0.8f, height * 1.4f, rearDist * 0.85f,
+                               18.0f, 40.0f, 1.5f, baseZoom * 0.92f, 11.0f, "Quarter RL",
+                               0.18f * driftScale, 0.04f * driftScale, -0.18f * driftScale,
+                               -0.15f, -0.50f, -0.08f, 0.0f});
     
-    // Wing tip left - close wing view with offset
+    // Quarter Rear Right - Departure view from rear-right
     g_externalShots.push_back({CameraType::External,
-                               -closeDist, height * 0.4f, fuselageLen * 0.2f,
-                               10.0f, 60.0f, -3.0f, closeZoom, 8.0f, "Wing Left",
-                               0.1f * driftScale, 0.04f * driftScale, -0.12f * driftScale,
-                               0.0f, 0.6f, 0.15f, 0.0f});
+                               midDist * 0.8f, height * 1.4f, rearDist * 0.85f,
+                               18.0f, -40.0f, -1.5f, baseZoom * 0.92f, 11.0f, "Quarter RR",
+                               -0.18f * driftScale, 0.04f * driftScale, -0.18f * driftScale,
+                               -0.15f, 0.50f, 0.08f, 0.0f});
     
-    // Wing tip right - close wing view with offset
-    g_externalShots.push_back({CameraType::External,
-                               closeDist, height * 0.4f, fuselageLen * 0.2f,
-                               10.0f, -60.0f, 3.0f, closeZoom, 8.0f, "Wing Right",
-                               -0.1f * driftScale, 0.04f * driftScale, -0.12f * driftScale,
-                               0.0f, -0.6f, -0.15f, 0.0f});
+    // ---- CLOSE-UP SHOTS (Detail views) ----
     
-    // Engine close-up left - positioned to see engine from outside
+    // Wing Left Close - Wing and engine detail
     g_externalShots.push_back({CameraType::External,
-                               -wingspan * 0.4f, height * 0.15f, -fuselageLen * 0.1f,
-                               8.0f, 75.0f, 0.0f, closeZoom * 1.2f, 7.0f, "Engine L",
-                               0.06f * driftScale, 0.03f * driftScale, -0.1f * driftScale,
-                               0.0f, 0.4f, 0.0f, 0.0f});
+                               -closeDist * 0.9f, height * 0.4f, fuselageLen * 0.15f,
+                               8.0f, 65.0f, -2.0f, closeZoom, 9.0f, "Wing Left",
+                               0.08f * driftScale, 0.03f * driftScale, -0.10f * driftScale,
+                               0.0f, 0.50f, 0.12f, 0.0f});
     
-    // Engine close-up right - positioned to see engine from outside
+    // Wing Right Close - Wing and engine detail
     g_externalShots.push_back({CameraType::External,
-                               wingspan * 0.4f, height * 0.15f, -fuselageLen * 0.1f,
-                               8.0f, -75.0f, 0.0f, closeZoom * 1.2f, 7.0f, "Engine R",
-                               -0.06f * driftScale, 0.03f * driftScale, -0.1f * driftScale,
-                               0.0f, -0.4f, 0.0f, 0.0f});
+                               closeDist * 0.9f, height * 0.4f, fuselageLen * 0.15f,
+                               8.0f, -65.0f, 2.0f, closeZoom, 9.0f, "Wing Right",
+                               -0.08f * driftScale, 0.03f * driftScale, -0.10f * driftScale,
+                               0.0f, -0.50f, -0.12f, 0.0f});
     
-    // Tail view - looking at tail from behind and above
+    // Engine Left - Engine nacelle focus
     g_externalShots.push_back({CameraType::External,
-                               -wingspan * 0.25f, height * 1.2f, rearDist * 1.1f,
-                               28.0f, 10.0f, 0.0f, baseExternalZoom, 9.0f, "Tail View",
-                               0.1f * driftScale, 0.06f * driftScale, -0.12f * driftScale,
-                               -0.25f, -0.6f, 0.0f, 0.0f});
+                               -wingspan * 0.35f, height * 0.2f, -fuselageLen * 0.05f,
+                               6.0f, 70.0f, 0.0f, closeZoom * 1.15f, 8.0f, "Engine L",
+                               0.05f * driftScale, 0.025f * driftScale, -0.08f * driftScale,
+                               0.0f, 0.35f, 0.0f, 0.0f});
     
-    // Side profile - mid-level shot with upward pitch to see aircraft underside
+    // Engine Right - Engine nacelle focus
     g_externalShots.push_back({CameraType::External,
-                               wingspan * 0.2f, height * 0.3f, 0.0f,
-                               -20.0f, -5.0f, 0.0f, baseExternalZoom * 1.05f, 8.0f, "Side Profile",
-                               -0.05f * driftScale, 0.08f * driftScale, 0.0f,
-                               0.3f, 0.4f, 0.0f, 0.0f});
+                               wingspan * 0.35f, height * 0.2f, -fuselageLen * 0.05f,
+                               6.0f, -70.0f, 0.0f, closeZoom * 1.15f, 8.0f, "Engine R",
+                               -0.05f * driftScale, 0.025f * driftScale, -0.08f * driftScale,
+                               0.0f, -0.35f, 0.0f, 0.0f});
+    
+    // Tail View - Empennage focus
+    g_externalShots.push_back({CameraType::External,
+                               -wingspan * 0.2f, height * 1.3f, rearDist * 1.2f,
+                               25.0f, 8.0f, 0.0f, baseZoom * 0.95f, 10.0f, "Tail View",
+                               0.08f * driftScale, 0.05f * driftScale, -0.10f * driftScale,
+                               -0.20f, -0.50f, 0.0f, 0.0f});
+    
+    // ---- SPECIALTY SHOTS (Unique angles) ----
+    
+    // Low Front - Dramatic low angle looking up
+    g_externalShots.push_back({CameraType::External,
+                               wingspan * 0.25f, height * 0.15f, -frontDist * 0.7f,
+                               -18.0f, 165.0f, 2.0f, frontZoom * 1.05f, 9.0f, "Low Front",
+                               -0.08f * driftScale, 0.12f * driftScale, 0.18f * driftScale,
+                               0.30f, 0.40f, -0.15f, 0.0f});
+    
+    // Belly View - Looking up from below
+    g_externalShots.push_back({CameraType::External,
+                               wingspan * 0.15f, -height * 0.8f, fuselageLen * 0.1f,
+                               -40.0f, -8.0f, 0.0f, baseZoom * 1.05f, 8.0f, "Belly View",
+                               -0.04f * driftScale, 0.06f * driftScale, 0.0f,
+                               0.25f, 0.35f, 0.0f, 0.0f});
+    
+    // Side Profile - Pure side view
+    g_externalShots.push_back({CameraType::External,
+                               -sideDist * 0.85f, height * 0.6f, 0.0f,
+                               3.0f, 90.0f, 0.0f, baseZoom * 0.95f, 10.0f, "Side Profile L",
+                               0.30f * driftScale, 0.04f * driftScale, 0.0f,
+                               0.0f, 0.0f, 0.0f, 0.0f});
+    
+    // Nose Close - Cockpit window close-up
+    g_externalShots.push_back({CameraType::External,
+                               -wingspan * 0.08f, height * 0.5f, -fuselageLen * 0.55f,
+                               5.0f, 175.0f, 0.0f, closeZoom * 1.2f, 8.0f, "Nose Close",
+                               0.04f * driftScale, 0.06f * driftScale, 0.12f * driftScale,
+                               -0.08f, 0.20f, 0.0f, 0.015f});
     
     char msg[128];
-    snprintf(msg, sizeof(msg), "MovieCamera: Generated %zu cockpit and %zu external shots for aircraft (scale: %.2f)\n",
+    snprintf(msg, sizeof(msg), "MovieCamera: Generated %zu cockpit and %zu external shots (scale: %.2f)\n",
              g_cockpitShots.size(), g_externalShots.size(), scale);
     XPLMDebugString(msg);
 }
@@ -1262,6 +953,55 @@ static void MenuHandler(void* inMenuRef, void* inItemRef) {
  */
 static float Lerp(float a, float b, float t) {
     return a + (b - a) * t;
+}
+
+/**
+ * Transform a point from aircraft-local coordinates to world coordinates
+ * considering full aircraft attitude (heading, pitch, roll)
+ * @param localX, localY, localZ - Position in aircraft-local coordinates
+ * @param acfX, acfY, acfZ - Aircraft position in world coordinates
+ * @param heading, pitch, roll - Aircraft attitude in degrees
+ * @param outX, outY, outZ - Output world coordinates
+ */
+static void TransformToWorldCoordinates(
+    float localX, float localY, float localZ,
+    float acfX, float acfY, float acfZ,
+    float heading, float pitch, float roll,
+    float& outX, float& outY, float& outZ)
+{
+    // Convert angles to radians
+    float h = heading * PI / 180.0f;
+    float p = pitch * PI / 180.0f;
+    float r = roll * PI / 180.0f;
+    
+    // Precompute trigonometric values
+    float cosH = std::cos(h), sinH = std::sin(h);
+    float cosP = std::cos(p), sinP = std::sin(p);
+    float cosR = std::cos(r), sinR = std::sin(r);
+    
+    // Combined rotation matrix (ZYX order: heading, then pitch, then roll)
+    // This matches X-Plane's coordinate system conventions
+    // X-Plane uses: heading (psi) around Y, pitch (theta) around X, roll (phi) around Z
+    
+    // First rotate by heading (around Y axis)
+    float x1 = localX * cosH - localZ * sinH;
+    float y1 = localY;
+    float z1 = localX * sinH + localZ * cosH;
+    
+    // Then rotate by pitch (around X axis) - note: X-Plane pitch positive = nose up
+    float x2 = x1;
+    float y2 = y1 * cosP + z1 * sinP;
+    float z2 = -y1 * sinP + z1 * cosP;
+    
+    // Finally rotate by roll (around Z axis)
+    float x3 = x2 * cosR - y2 * sinR;
+    float y3 = x2 * sinR + y2 * cosR;
+    float z3 = z2;
+    
+    // Add aircraft position
+    outX = acfX + x3;
+    outY = acfY + y3;
+    outZ = acfZ + z3;
 }
 
 /**
@@ -1390,30 +1130,6 @@ static void ValidateCameraPosition(float& worldCamX, float& worldCamY, float& wo
     }
 }
 
-// Note: CatmullRom spline function may be added in future for advanced path interpolation
-
-/**
- * Interpolate between two keyframes with smooth easing
- */
-static CameraKeyframe InterpolateKeyframes(const CameraKeyframe& a, const CameraKeyframe& b, float t) {
-    // Use ease-in-out sine for smoother interpolation
-    float smoothT = EaseInOutSine(t);
-    
-    CameraKeyframe result;
-    result.time = Lerp(a.time, b.time, t);  // Linear time
-    result.x = Lerp(a.x, b.x, smoothT);
-    result.y = Lerp(a.y, b.y, smoothT);
-    result.z = Lerp(a.z, b.z, smoothT);
-    result.pitch = Lerp(a.pitch, b.pitch, smoothT);
-    result.heading = LerpAngle(a.heading, b.heading, smoothT);
-    result.roll = Lerp(a.roll, b.roll, smoothT);
-    result.zoom = Lerp(a.zoom, b.zoom, smoothT);
-    result.focalLength = Lerp(a.focalLength, b.focalLength, smoothT);
-    result.aperture = Lerp(a.aperture, b.aperture, smoothT);
-    
-    return result;
-}
-
 /**
  * Get the plugin directory path
  */
@@ -1431,102 +1147,190 @@ static std::string GetPluginPath() {
 }
 
 /**
- * Save custom camera paths to a file
+ * Convert focal length in millimeters to field of view in degrees
+ * Uses the standard 35mm full-frame sensor width (36mm)
+ * Formula: FOV = 2 * atan(sensorWidth / (2 * focalLength)) * 180 / PI
  */
-static void SaveCustomPaths() {
-    std::string path = GetPluginPath() + "camera_paths.cfg";
-    FILE* file = fopen(path.c_str(), "w");
-    if (!file) {
-        XPLMDebugString("MovieCamera: Failed to save custom paths\n");
-        return;
-    }
-    
-    fprintf(file, "# MovieCamera Custom Camera Paths\n");
-    fprintf(file, "version 1\n");
-    fprintf(file, "paths %zu\n", g_customPaths.size());
-    
-    for (const auto& cpath : g_customPaths) {
-        fprintf(file, "\npath_start\n");
-        fprintf(file, "name %s\n", cpath.name.c_str());
-        fprintf(file, "type %d\n", static_cast<int>(cpath.type));
-        fprintf(file, "looping %d\n", cpath.isLooping ? 1 : 0);
-        fprintf(file, "keyframes %zu\n", cpath.keyframes.size());
-        
-        for (const auto& kf : cpath.keyframes) {
-            fprintf(file, "kf %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f %.3f\n",
-                    kf.time, kf.x, kf.y, kf.z, kf.pitch, kf.heading, kf.roll,
-                    kf.zoom, kf.focalLength, kf.aperture);
-        }
-        fprintf(file, "path_end\n");
-    }
-    
-    fclose(file);
-    XPLMDebugString("MovieCamera: Custom paths saved\n");
+static float FocalLengthToFov(float focalLengthMm) {
+    if (focalLengthMm <= 0.0f) focalLengthMm = 50.0f;  // Default to 50mm if invalid
+    float fovRad = 2.0f * std::atan(SENSOR_WIDTH_MM / (2.0f * focalLengthMm));
+    return fovRad * 180.0f / PI;
 }
 
 /**
- * Load custom camera paths from a file
+ * Convert field of view in degrees to focal length in millimeters
+ * Inverse of FocalLengthToFov
+ * Formula: focalLength = sensorWidth / (2 * tan(FOV/2))
  */
-static void LoadCustomPaths() {
-    std::string path = GetPluginPath() + "camera_paths.cfg";
-    FILE* file = fopen(path.c_str(), "r");
+static float FovToFocalLength(float fovDeg) {
+    if (fovDeg <= 0.0f || fovDeg >= 180.0f) fovDeg = 60.0f;  // Default to 60° if invalid
+    float fovRad = fovDeg * PI / 180.0f;
+    return SENSOR_WIDTH_MM / (2.0f * std::tan(fovRad / 2.0f));
+}
+
+/**
+ * Apply FOV effect with smooth transition
+ * Gradually adjusts the field of view towards the target value
+ */
+static void ApplyFovEffect(float targetFov, float deltaTime) {
+    if (!g_drFovHorizontal) return;
+    
+    // Smooth transition to target FOV
+    float diff = targetFov - g_currentFov;
+    float maxChange = g_fovTransitionSpeed * deltaTime;
+    
+    if (std::abs(diff) <= maxChange) {
+        g_currentFov = targetFov;
+    } else if (diff > 0) {
+        g_currentFov += maxChange;
+    } else {
+        g_currentFov -= maxChange;
+    }
+    
+    // Apply to X-Plane
+    XPLMSetDataf(g_drFovHorizontal, g_currentFov);
+    
+    // Also set vertical FOV if available (maintain aspect ratio)
+    if (g_drFovVertical) {
+        // Assuming 16:9 aspect ratio
+        float vFov = 2.0f * std::atan(std::tan(g_currentFov * PI / 360.0f) * 9.0f / 16.0f) * 180.0f / PI;
+        XPLMSetDataf(g_drFovVertical, vFov);
+    }
+}
+
+/**
+ * Save the current X-Plane camera effect state before taking control
+ * Stores original FOV and camera effect settings for restoration
+ */
+static void SaveCameraEffectState() {
+    // Save original FOV
+    if (g_drFovHorizontal) {
+        g_originalFov = XPLMGetDataf(g_drFovHorizontal);
+        g_currentFov = g_baseFov;  // Start at our base FOV
+    } else {
+        g_originalFov = DEFAULT_FOV_DEG;
+        g_currentFov = g_baseFov;
+    }
+    
+    // Save original handheld camera setting
+    if (g_drHandheldCam) {
+        g_originalHandheldCam = XPLMGetDataf(g_drHandheldCam);
+    }
+    
+    // Save original G-loaded camera setting
+    if (g_drGloadedCam) {
+        g_originalGloadedCam = XPLMGetDataf(g_drGloadedCam);
+    }
+    
+    XPLMDebugString("MovieCamera: Camera effect state saved\n");
+}
+
+/**
+ * Restore the original X-Plane camera effect state
+ * Called when releasing camera control
+ */
+static void RestoreCameraEffectState() {
+    // Restore original FOV
+    if (g_drFovHorizontal) {
+        XPLMSetDataf(g_drFovHorizontal, g_originalFov);
+    }
+    
+    // Also restore vertical FOV
+    if (g_drFovVertical) {
+        float vFov = 2.0f * std::atan(std::tan(g_originalFov * PI / 360.0f) * 9.0f / 16.0f) * 180.0f / PI;
+        XPLMSetDataf(g_drFovVertical, vFov);
+    }
+    
+    // Restore handheld camera setting
+    if (g_drHandheldCam) {
+        XPLMSetDataf(g_drHandheldCam, g_originalHandheldCam);
+    }
+    
+    // Restore G-loaded camera setting
+    if (g_drGloadedCam) {
+        XPLMSetDataf(g_drGloadedCam, g_originalGloadedCam);
+    }
+    
+    XPLMDebugString("MovieCamera: Camera effect state restored\n");
+}
+
+/**
+ * Save plugin settings to a file
+ */
+static void SaveSettings() {
+    std::string path = GetPluginPath() + "settings.cfg";
+    FILE* file = fopen(path.c_str(), "w");
     if (!file) {
-        // No saved paths file - that's OK
+        XPLMDebugString("MovieCamera: Failed to save settings\n");
         return;
     }
     
-    g_customPaths.clear();
+    fprintf(file, "# MovieCamera Settings\n");
+    fprintf(file, "version 2\n");
+    fprintf(file, "delay_seconds %.1f\n", g_delaySeconds);
+    fprintf(file, "auto_alt_ft %.0f\n", g_autoAltFt);
+    fprintf(file, "shot_min_duration %.1f\n", g_shotMinDuration);
+    fprintf(file, "shot_max_duration %.1f\n", g_shotMaxDuration);
+    
+    // Cinematic effects settings
+    fprintf(file, "enable_fov_effect %d\n", g_enableFovEffect ? 1 : 0);
+    fprintf(file, "base_fov %.1f\n", g_baseFov);
+    fprintf(file, "fov_transition_speed %.1f\n", g_fovTransitionSpeed);
+    fprintf(file, "enable_handheld_effect %d\n", g_enableHandheldEffect ? 1 : 0);
+    fprintf(file, "handheld_intensity %.2f\n", g_handheldIntensity);
+    fprintf(file, "enable_gforce_effect %d\n", g_enableGForceEffect ? 1 : 0);
+    
+    fclose(file);
+    XPLMDebugString("MovieCamera: Settings saved\n");
+}
+
+/**
+ * Load plugin settings from a file
+ */
+static void LoadSettings() {
+    std::string path = GetPluginPath() + "settings.cfg";
+    FILE* file = fopen(path.c_str(), "r");
+    if (!file) {
+        // No saved settings file - use defaults
+        return;
+    }
     
     char line[256];
-    
     while (fgets(line, sizeof(line), file)) {
         if (line[0] == '#') continue;
         
-        if (strncmp(line, "path_start", 10) == 0) {
-            CustomCameraPath cpath;
-            cpath.isLooping = false;
-            cpath.type = CameraType::External;
-            
-            while (fgets(line, sizeof(line), file)) {
-                if (strncmp(line, "path_end", 8) == 0) break;
-                
-                if (strncmp(line, "name ", 5) == 0) {
-                    // Safe string parsing with bounds checking
-                    char name[64] = {0};
-                    int result = sscanf(line + 5, "%63[^\n]", name);
-                    if (result == 1) {
-                        cpath.name = name;
-                    }
-                } else if (strncmp(line, "type ", 5) == 0) {
-                    int typeVal = atoi(line + 5);
-                    if (typeVal == 0 || typeVal == 1) {
-                        cpath.type = static_cast<CameraType>(typeVal);
-                    }
-                } else if (strncmp(line, "looping ", 8) == 0) {
-                    cpath.isLooping = (atoi(line + 8) != 0);
-                } else if (strncmp(line, "kf ", 3) == 0) {
-                    CameraKeyframe kf = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 50.0f, 2.8f};
-                    int parsed = sscanf(line + 3, "%f %f %f %f %f %f %f %f %f %f",
-                           &kf.time, &kf.x, &kf.y, &kf.z, &kf.pitch, &kf.heading,
-                           &kf.roll, &kf.zoom, &kf.focalLength, &kf.aperture);
-                    // Only add keyframe if all 10 values were successfully parsed
-                    if (parsed == 10) {
-                        cpath.keyframes.push_back(kf);
-                    }
-                }
-            }
-            
-            if (!cpath.name.empty()) {
-                g_customPaths.push_back(cpath);
-            }
+        float value;
+        int intValue;
+        if (sscanf(line, "delay_seconds %f", &value) == 1) {
+            g_delaySeconds = std::clamp(value, 1.0f, 300.0f);
+        } else if (sscanf(line, "auto_alt_ft %f", &value) == 1) {
+            g_autoAltFt = std::clamp(value, 0.0f, 50000.0f);
+        } else if (sscanf(line, "shot_min_duration %f", &value) == 1) {
+            g_shotMinDuration = std::clamp(value, 1.0f, 30.0f);
+        } else if (sscanf(line, "shot_max_duration %f", &value) == 1) {
+            g_shotMaxDuration = std::clamp(value, 1.0f, 30.0f);
+        } else if (sscanf(line, "enable_fov_effect %d", &intValue) == 1) {
+            g_enableFovEffect = (intValue != 0);
+        } else if (sscanf(line, "base_fov %f", &value) == 1) {
+            g_baseFov = std::clamp(value, MIN_FOV_DEG, MAX_FOV_DEG);
+        } else if (sscanf(line, "fov_transition_speed %f", &value) == 1) {
+            g_fovTransitionSpeed = std::clamp(value, 1.0f, 30.0f);
+        } else if (sscanf(line, "enable_handheld_effect %d", &intValue) == 1) {
+            g_enableHandheldEffect = (intValue != 0);
+        } else if (sscanf(line, "handheld_intensity %f", &value) == 1) {
+            g_handheldIntensity = std::clamp(value, 0.0f, 1.0f);
+        } else if (sscanf(line, "enable_gforce_effect %d", &intValue) == 1) {
+            g_enableGForceEffect = (intValue != 0);
         }
     }
     
-    fclose(file);
+    // Ensure min <= max
+    if (g_shotMinDuration > g_shotMaxDuration) {
+        g_shotMinDuration = g_shotMaxDuration;
+    }
     
-    char msg[128];
-    snprintf(msg, sizeof(msg), "MovieCamera: Loaded %zu custom paths\n", g_customPaths.size());
-    XPLMDebugString(msg);
+    fclose(file);
+    XPLMDebugString("MovieCamera: Settings loaded\n");
 }
 
 /**
@@ -1628,9 +1432,6 @@ static void StartCameraControl() {
     g_consecutiveSameTypeCount = 0;
     g_inTransition = false;
     
-    // Initialize random seed
-    std::srand(static_cast<unsigned>(std::time(nullptr)));
-    
     // Start with a random shot type
     g_lastShotType = (std::rand() % 2 == 0) ? CameraType::Cockpit : CameraType::External;
     
@@ -1673,6 +1474,21 @@ static void StartCameraControl() {
     g_transitionProgress = 0.0f;
     g_currentShotTime = firstShot.duration;
     
+    // Save current camera effect state before taking control
+    SaveCameraEffectState();
+    
+    // Apply initial handheld effect setting if enabled
+    if (g_enableHandheldEffect && g_drHandheldCam) {
+        XPLMSetDataf(g_drHandheldCam, g_handheldIntensity);
+    }
+    
+    // Apply initial G-force effect setting
+    if (g_enableGForceEffect && g_drGloadedCam) {
+        XPLMSetDataf(g_drGloadedCam, 1.0f);
+    } else if (g_drGloadedCam) {
+        XPLMSetDataf(g_drGloadedCam, 0.0f);
+    }
+    
     // Take camera control
     XPLMControlCamera(xplm_ControlCameraForever, CameraControlCallback, nullptr);
     
@@ -1690,6 +1506,9 @@ static void StopCameraControl() {
     
     // Release camera control
     XPLMDontControlCamera();
+    
+    // Restore original camera effect state
+    RestoreCameraEffectState();
     
     XPLMDebugString("MovieCamera: Camera control stopped\n");
 }
@@ -1738,60 +1557,8 @@ static int CameraControlCallback(XPLMCameraPosition_t* outCameraPosition, int in
     float acfY = XPLMGetDataf(g_drLocalY);
     float acfZ = XPLMGetDataf(g_drLocalZ);
     float acfHeading = XPLMGetDataf(g_drHeading);
-    
-    // Check if using custom camera path
-    if (g_usingCustomPath && g_currentCustomPathIndex >= 0 && 
-        g_currentCustomPathIndex < static_cast<int>(g_customPaths.size())) {
-        
-        const CustomCameraPath& cpath = g_customPaths[g_currentCustomPathIndex];
-        if (cpath.keyframes.size() >= 2) {
-            float pathTime = g_customPathTime;
-            float totalDuration = cpath.getTotalDuration();
-            
-            // Handle looping
-            if (cpath.isLooping && totalDuration > 0.0f) {
-                pathTime = std::fmod(pathTime, totalDuration);
-            }
-            
-            // Find the two keyframes to interpolate between
-            size_t kfIndex = 0;
-            for (size_t i = 0; i < cpath.keyframes.size() - 1; ++i) {
-                if (pathTime >= cpath.keyframes[i].time && pathTime < cpath.keyframes[i + 1].time) {
-                    kfIndex = i;
-                    break;
-                }
-                if (i == cpath.keyframes.size() - 2) {
-                    kfIndex = i;
-                }
-            }
-            
-            const CameraKeyframe& kf1 = cpath.keyframes[kfIndex];
-            const CameraKeyframe& kf2 = cpath.keyframes[(std::min)(kfIndex + 1, cpath.keyframes.size() - 1)];
-            
-            // Calculate interpolation factor
-            float segmentDuration = kf2.time - kf1.time;
-            float t = (segmentDuration > 0.001f) ? (pathTime - kf1.time) / segmentDuration : 0.0f;
-            t = (std::max)(0.0f, (std::min)(1.0f, t));
-            
-            // Interpolate keyframes with smooth easing
-            CameraKeyframe interpolated = InterpolateKeyframes(kf1, kf2, t);
-            
-            // Transform to world coordinates
-            float rad = acfHeading * PI / 180.0f;
-            float cosH = std::cos(rad);
-            float sinH = std::sin(rad);
-            
-            outCameraPosition->x = acfX + interpolated.x * cosH - interpolated.z * sinH;
-            outCameraPosition->y = acfY + interpolated.y;
-            outCameraPosition->z = acfZ + interpolated.x * sinH + interpolated.z * cosH;
-            outCameraPosition->pitch = interpolated.pitch;
-            outCameraPosition->heading = acfHeading + interpolated.heading;
-            outCameraPosition->roll = interpolated.roll;
-            outCameraPosition->zoom = interpolated.zoom;
-            
-            return 1;
-        }
-    }
+    float acfPitch = XPLMGetDataf(g_drPitch);
+    float acfRoll = XPLMGetDataf(g_drRoll);
     
     if (g_inTransition) {
         // Smooth transition between shots using ease-in-out
@@ -1816,9 +1583,6 @@ static int CameraControlCallback(XPLMCameraPosition_t* outCameraPosition, int in
     } else {
         // Apply shot with consistent linear drift - like Horizon game
         // Once drift direction is set at shot start, maintain it throughout
-        float rad = acfHeading * PI / 180.0f;
-        float cosH = std::cos(rad);
-        float sinH = std::sin(rad);
         
         // Calculate normalized time (0 at start, 1 at end of shot)
         float normalizedTime = g_shotElapsedTime / g_currentShot.duration;
@@ -1845,18 +1609,30 @@ static int CameraControlCallback(XPLMCameraPosition_t* outCameraPosition, int in
         // Zoom drift with same consistent direction
         float driftedZoom = LinearDrift(g_currentShot.zoom, g_currentShot.driftZoom * g_currentShot.duration, normalizedTime);
         
-        // Transform position offset from aircraft-relative to world coordinates
-        float worldCamX = acfX + driftedX * cosH - driftedZ * sinH;
-        float worldCamY = acfY + driftedY;
-        float worldCamZ = acfZ + driftedX * sinH + driftedZ * cosH;
+        float worldCamX, worldCamY, worldCamZ;
         
-        // For external shots, apply world-space validations
         if (g_currentShot.type == CameraType::External) {
+            // For external shots, use full 3D rotation to keep camera position
+            // relative to aircraft attitude (pitch, roll, heading)
+            TransformToWorldCoordinates(
+                driftedX, driftedY, driftedZ,
+                acfX, acfY, acfZ,
+                acfHeading, acfPitch, acfRoll,
+                worldCamX, worldCamY, worldCamZ);
+            
             // Ensure camera doesn't go underground
             worldCamY = EnsureAboveGround(worldCamY);
             
             // Validate camera position to ensure aircraft is visible (in world-space)
             ValidateCameraPosition(worldCamX, worldCamY, worldCamZ, acfX, acfY, acfZ, g_currentShot.type);
+        } else {
+            // For cockpit shots, only use heading rotation (cockpit moves with aircraft)
+            float rad = acfHeading * PI / 180.0f;
+            float cosH = std::cos(rad);
+            float sinH = std::sin(rad);
+            worldCamX = acfX + driftedX * cosH - driftedZ * sinH;
+            worldCamY = acfY + driftedY;
+            worldCamZ = acfZ + driftedX * sinH + driftedZ * cosH;
         }
         
         outCameraPosition->x = worldCamX;
@@ -1866,6 +1642,13 @@ static int CameraControlCallback(XPLMCameraPosition_t* outCameraPosition, int in
         outCameraPosition->heading = acfHeading + driftedHeading;
         outCameraPosition->roll = driftedRoll;
         outCameraPosition->zoom = driftedZoom;
+    }
+    
+    // Apply FOV effect if enabled
+    if (g_enableFovEffect && g_drFovHorizontal) {
+        // Use a small delta time estimate for smooth transitions
+        // (actual deltaTime would require tracking between frames)
+        ApplyFovEffect(g_baseFov, 0.016f);  // ~60fps assumed
     }
     
     return 1;
@@ -1921,22 +1704,7 @@ static float FlightLoopCallback(float inElapsedSinceLastCall, float inElapsedTim
     
     // Update camera shot timing
     if (g_functionActive && !g_functionPaused) {
-        // Update custom path time if using custom path
-        if (g_usingCustomPath && g_currentCustomPathIndex >= 0 && 
-            g_currentCustomPathIndex < static_cast<int>(g_customPaths.size())) {
-            
-            g_customPathTime += inElapsedSinceLastCall;
-            
-            const CustomCameraPath& cpath = g_customPaths[g_currentCustomPathIndex];
-            float totalDuration = cpath.getTotalDuration();
-            
-            // Check if path has finished (non-looping)
-            if (!cpath.isLooping && g_customPathTime >= totalDuration) {
-                g_usingCustomPath = false;
-                g_currentCustomPathIndex = -1;
-                // Continue with normal shot rotation
-            }
-        } else if (g_inTransition) {
+        if (g_inTransition) {
             g_transitionProgress += inElapsedSinceLastCall / g_transitionDuration;
             if (g_transitionProgress >= 1.0f) {
                 g_inTransition = false;
@@ -1995,117 +1763,6 @@ static float FlightLoopCallback(float inElapsedSinceLastCall, float inElapsedTim
 }
 
 /**
- * Draw callback to visualize camera trajectory in 3D space
- */
-static int DrawTrajectoryCallback(XPLMDrawingPhase inPhase, int inIsBefore, void* inRefcon) {
-    (void)inPhase;
-    (void)inIsBefore;
-    (void)inRefcon;
-    
-    // Only draw if trajectory preview is enabled and we have a path being edited
-    if (!g_showTrajectoryPreview || !g_pathEditorOpen || g_editingPath.keyframes.size() < 2) {
-        return 1;
-    }
-    
-    // Get aircraft position
-    float acfX = XPLMGetDataf(g_drLocalX);
-    float acfY = XPLMGetDataf(g_drLocalY);
-    float acfZ = XPLMGetDataf(g_drLocalZ);
-    float acfHeading = XPLMGetDataf(g_drHeading);
-    
-    float rad = acfHeading * PI / 180.0f;
-    float cosH = std::cos(rad);
-    float sinH = std::sin(rad);
-    
-    // Set up OpenGL state for drawing lines
-    // XPLMSetGraphicsState(fog, numberTexUnits, lighting, alphaTesting, alphaBlending, depthTesting, depthWriting)
-    // Disable depth testing (param 6) to ensure lines are always visible
-    XPLMSetGraphicsState(0, 0, 0, 0, 1, 0, 0);
-    
-    // Draw trajectory line (green color)
-    glColor4f(0.0f, 1.0f, 0.3f, 0.8f);
-    glLineWidth(3.0f);
-    glBegin(GL_LINE_STRIP);
-    
-    // Sample trajectory at regular intervals
-    float totalDuration = g_editingPath.getTotalDuration();
-    int numSamples = static_cast<int>(totalDuration * 10.0f);  // 10 samples per second
-    if (numSamples < 20) numSamples = 20;
-    if (numSamples > 200) numSamples = 200;
-    
-    for (int i = 0; i <= numSamples; ++i) {
-        float t = static_cast<float>(i) / static_cast<float>(numSamples);
-        float pathTime = t * totalDuration;
-        
-        // Find keyframes to interpolate
-        size_t kfIndex = 0;
-        for (size_t j = 0; j < g_editingPath.keyframes.size() - 1; ++j) {
-            if (pathTime >= g_editingPath.keyframes[j].time && 
-                pathTime < g_editingPath.keyframes[j + 1].time) {
-                kfIndex = j;
-                break;
-            }
-            if (j == g_editingPath.keyframes.size() - 2) {
-                kfIndex = j;
-            }
-        }
-        
-        const CameraKeyframe& kf1 = g_editingPath.keyframes[kfIndex];
-        const CameraKeyframe& kf2 = g_editingPath.keyframes[(std::min)(kfIndex + 1, g_editingPath.keyframes.size() - 1)];
-        
-        float segDuration = kf2.time - kf1.time;
-        float segT = (segDuration > 0.001f) ? (pathTime - kf1.time) / segDuration : 0.0f;
-        segT = std::clamp(segT, 0.0f, 1.0f);
-        
-        // Interpolate position with easing
-        float smoothT = EaseInOutSine(segT);
-        float posX = Lerp(kf1.x, kf2.x, smoothT);
-        float posY = Lerp(kf1.y, kf2.y, smoothT);
-        float posZ = Lerp(kf1.z, kf2.z, smoothT);
-        
-        // Transform to world coordinates
-        float worldX = acfX + posX * cosH - posZ * sinH;
-        float worldY = acfY + posY;
-        float worldZ = acfZ + posX * sinH + posZ * cosH;
-        
-        glVertex3f(worldX, worldY, worldZ);
-    }
-    glEnd();
-    
-    // Draw keyframe points (yellow spheres approximated with points)
-    glColor4f(1.0f, 1.0f, 0.0f, 1.0f);
-    glPointSize(10.0f);
-    glBegin(GL_POINTS);
-    for (size_t i = 0; i < g_editingPath.keyframes.size(); ++i) {
-        const CameraKeyframe& kf = g_editingPath.keyframes[i];
-        float worldX = acfX + kf.x * cosH - kf.z * sinH;
-        float worldY = acfY + kf.y;
-        float worldZ = acfZ + kf.x * sinH + kf.z * cosH;
-        glVertex3f(worldX, worldY, worldZ);
-    }
-    glEnd();
-    
-    // Highlight selected keyframe (red)
-    if (g_editingKeyframeIndex >= 0 && g_editingKeyframeIndex < static_cast<int>(g_editingPath.keyframes.size())) {
-        const CameraKeyframe& kf = g_editingPath.keyframes[g_editingKeyframeIndex];
-        float worldX = acfX + kf.x * cosH - kf.z * sinH;
-        float worldY = acfY + kf.y;
-        float worldZ = acfZ + kf.x * sinH + kf.z * cosH;
-        
-        glColor4f(1.0f, 0.2f, 0.2f, 1.0f);
-        glPointSize(15.0f);
-        glBegin(GL_POINTS);
-        glVertex3f(worldX, worldY, worldZ);
-        glEnd();
-    }
-    
-    glLineWidth(1.0f);
-    glPointSize(1.0f);
-    
-    return 1;
-}
-
-/**
  * Plugin start
  */
 PLUGIN_API int XPluginStart(char* outName, char* outSig, char* outDesc) {
@@ -2133,6 +1790,23 @@ PLUGIN_API int XPluginStart(char* outName, char* outSig, char* outDesc) {
     g_drPilotZ = XPLMFindDataRef("sim/graphics/view/pilots_head_z");
     g_drViewType = XPLMFindDataRef("sim/graphics/view/view_type");
     
+    // Camera effect datarefs (X-Plane 12+)
+    g_drFovHorizontal = XPLMFindDataRef("sim/graphics/view/field_of_view_deg");
+    g_drFovVertical = XPLMFindDataRef("sim/graphics/view/vertical_field_of_view_deg");
+    g_drHandheldCam = XPLMFindDataRef("sim/graphics/view/handheld_external_cam");
+    g_drGloadedCam = XPLMFindDataRef("sim/graphics/view/gloaded_internal_cam");
+    g_drViewIsExternal = XPLMFindDataRef("sim/graphics/view/view_is_external");
+    
+    if (!g_drFovHorizontal) {
+        XPLMDebugString("MovieCamera: FOV dataref not found - FOV effects disabled\n");
+    } else {
+        XPLMDebugString("MovieCamera: FOV control enabled\n");
+    }
+    
+    if (!g_drHandheldCam) {
+        XPLMDebugString("MovieCamera: Handheld camera dataref not found - handheld effect disabled\n");
+    }
+    
     // Terrain height dataref for ground collision prevention
     g_drTerrainY = XPLMFindDataRef("sim/flightmodel/position/y_agl");
     // Fallback: if y_agl not available, calculate from local_y - elevation
@@ -2142,29 +1816,38 @@ PLUGIN_API int XPluginStart(char* outName, char* outSig, char* outDesc) {
     }
     
     // Find aircraft dimension datarefs (loaded from .acf file by X-Plane)
-    // Primary source: direct aircraft geometry datarefs
-    g_drAcfWingSpan = XPLMFindDataRef("sim/aircraft/parts/acf_wing_span");
-    // Note: No reliable fallback for wingspan - will use pilot eye based estimation if unavailable
+    // Primary sources for aircraft size - these are the shadow/viewing distance sizes
+    g_drAcfSizeX = XPLMFindDataRef("sim/aircraft/view/acf_size_x");   // Shadow size X (width/wingspan)
+    g_drAcfSizeZ = XPLMFindDataRef("sim/aircraft/view/acf_size_z");   // Shadow size Z (length)
     
-    // CG limits provide good approximation of aircraft length
+    // Wing segment semi-lengths for precise wingspan calculation
+    g_drAcfSemilenSEG = XPLMFindDataRef("sim/aircraft/parts/acf_semilen_SEG");  // Per-segment semi-length
+    g_drAcfSemilenJND = XPLMFindDataRef("sim/aircraft/parts/acf_semilen_JND");  // Joined segment semi-length
+    
+    // CG limits provide good approximation of aircraft length (fallback)
     g_drAcfCgZFwd = XPLMFindDataRef("sim/aircraft/overflow/acf_cgZ_fwd");  // Forward CG limit
     g_drAcfCgZAft = XPLMFindDataRef("sim/aircraft/overflow/acf_cgZ_aft");  // Aft CG limit
     
     // Height estimation sources
     g_drAcfMinY = XPLMFindDataRef("sim/aircraft/parts/acf_gear_ynodef");  // Gear Y position for ground clearance
-    // Note: g_drAcfMaxY not used directly; height estimated from pilot eye position in ReadAircraftDimensions()
     g_drAcfMaxY = nullptr;
     
-    // Pilot eye position - most reliable datarefs for aircraft size estimation
+    // Pilot eye position - reliable datarefs for cockpit view positioning
     g_drAcfPeX = XPLMFindDataRef("sim/aircraft/view/acf_peX");   // Pilot eye X (lateral offset)
     g_drAcfPeY = XPLMFindDataRef("sim/aircraft/view/acf_peY");   // Pilot eye Y (height from CG)
     g_drAcfPeZ = XPLMFindDataRef("sim/aircraft/view/acf_peZ");   // Pilot eye Z (longitudinal from CG)
     
-    // Initialize with default camera shots first
-    InitializeCameraShots();
+    // Log which datarefs were found
+    char msg[512];
+    snprintf(msg, sizeof(msg), "MovieCamera: Datarefs found - acf_size_x: %s, acf_size_z: %s, semilen_JND: %s\n",
+             g_drAcfSizeX ? "yes" : "no",
+             g_drAcfSizeZ ? "yes" : "no", 
+             g_drAcfSemilenJND ? "yes" : "no");
+    XPLMDebugString(msg);
     
-    // Load custom camera paths
-    LoadCustomPaths();
+    // Initialize with dynamic camera shots based on default aircraft dimensions
+    // Will be regenerated when aircraft data is loaded
+    GenerateDynamicCameraShots();
     
     // Create menu
     int pluginMenuIndex = XPLMAppendMenuItem(XPLMFindPluginsMenu(), PLUGIN_NAME, nullptr, 0);
@@ -2214,16 +1897,18 @@ PLUGIN_API int XPluginEnable(void) {
     g_flightLoopId = XPLMCreateFlightLoop(&flightLoopParams);
     XPLMScheduleFlightLoop(g_flightLoopId, -1.0f, 1);
     
-    // Register draw callback for trajectory visualization
-    // Use xplm_Phase_Modern3D for X-Plane 11.50+ compatibility
-    XPLMRegisterDrawCallback(DrawTrajectoryCallback, xplm_Phase_Modern3D, 0, nullptr);
-    
     // Create settings window
     g_settingsWindow = std::make_unique<SettingsWindow>();
     g_settingsWindow->SetVisible(false);
     
     // Get initial mouse position
     XPLMGetMouseLocation(&g_lastMouseX, &g_lastMouseY);
+    
+    // Initialize random seed once at plugin enable
+    std::srand(static_cast<unsigned>(std::time(nullptr)));
+    
+    // Load user settings
+    LoadSettings();
     
     // Read aircraft dimensions and generate dynamic camera shots
     ReadAircraftDimensions();
@@ -2240,13 +1925,13 @@ PLUGIN_API int XPluginEnable(void) {
 PLUGIN_API void XPluginDisable(void) {
     XPLMDebugString("MovieCamera: Plugin disabling...\n");
     
+    // Save user settings
+    SaveSettings();
+    
     // Stop camera control if active
     if (g_functionActive) {
         StopCameraControl();
     }
-    
-    // Unregister draw callback
-    XPLMUnregisterDrawCallback(DrawTrajectoryCallback, xplm_Phase_Modern3D, 0, nullptr);
     
     // Destroy flight loop
     if (g_flightLoopId) {
@@ -2267,7 +1952,8 @@ PLUGIN_API void XPluginReceiveMessage(XPLMPluginID inFrom, int inMsg, void* inPa
     (void)inFrom;
     
     // Handle plane loaded message to reset state and recalculate camera shots
-    if (inMsg == XPLM_MSG_PLANE_LOADED && inParam == nullptr) {
+    // inParam == 0 means user's aircraft, other values are AI aircraft indices
+    if (inMsg == XPLM_MSG_PLANE_LOADED && reinterpret_cast<intptr_t>(inParam) == 0) {
         // User's plane loaded - read new aircraft dimensions and regenerate camera shots
         g_mouseIdleTime = 0.0f;
         
