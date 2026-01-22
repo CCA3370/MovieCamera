@@ -75,6 +75,37 @@ enum class CameraType {
     External
 };
 
+enum class WingspanSource {
+    Auto = 0,
+    AcfSizeX = 1,
+    Semilen = 2,
+    Default = 3,
+    Manual = 4
+};
+
+enum class FuselageLengthSource {
+    Auto = 0,
+    AcfSizeZ = 1,
+    CgRange = 2,
+    PilotEyeZ = 3,
+    Default = 4,
+    Manual = 5
+};
+
+enum class HeightSource {
+    Auto = 0,
+    GearPlusPilot = 1,
+    PilotEye = 2,
+    Default = 3,
+    Manual = 4
+};
+
+enum class DebugShotType {
+    Auto = 0,
+    Cockpit = 1,
+    External = 2
+};
+
 struct CameraShot {
     CameraType type;
     float x, y, z;           // Position offset from aircraft
@@ -160,6 +191,14 @@ static float g_delaySeconds = 60.0f;      // Delay before auto-activation (secon
 static float g_autoAltFt = 18000.0f;      // Altitude threshold for auto mode (feet)
 static float g_shotMinDuration = 6.0f;    // Minimum shot duration (longer for cinematic drift)
 static float g_shotMaxDuration = 15.0f;   // Maximum shot duration (longer for cinematic drift)
+static WingspanSource g_wingspanSource = WingspanSource::Auto;
+static FuselageLengthSource g_fuselageSource = FuselageLengthSource::Auto;
+static HeightSource g_heightSource = HeightSource::Auto;
+static float g_manualWingspan = STANDARD_WINGSPAN;
+static float g_manualFuselageLength = STANDARD_FUSELAGE_LENGTH;
+static float g_manualHeight = STANDARD_HEIGHT;
+static DebugShotType g_debugShotType = DebugShotType::Auto;
+static int g_debugShotIndex = -1;
 
 // Mouse tracking
 static int g_lastMouseX = 0;
@@ -305,7 +344,91 @@ void SettingsWindow::buildInterface() {
     ImGui::Separator();
     ImGui::Spacing();
     
-    // Delay setting
+    ImGui::Text("Debug Tools");
+    ImGui::SameLine();
+    ImGui::TextDisabled("(?)");
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Select data source used to determine aircraft dimensions.\nAuto uses available datarefs with fallbacks.\nManual forces the value you enter.");
+    }
+    ImGui::SetNextItemWidth(180);
+    int wsrc = static_cast<int>(g_wingspanSource);
+    const char* wsrcItems[] = {"Auto", "acf_size_x", "wing semilen", "Default", "Manual"};
+    if (ImGui::Combo("Wingspan Source##wsrc", &wsrc, wsrcItems, 5)) {
+        g_wingspanSource = static_cast<WingspanSource>(wsrc);
+        ReadAircraftDimensions();
+        GenerateDynamicCameraShots();
+    }
+    ImGui::SetNextItemWidth(120);
+    if (ImGui::InputFloat("Wingspan (m)##wmanual", &g_manualWingspan, 0.5f, 1.0f, "%.1f")) {
+        g_manualWingspan = std::clamp(g_manualWingspan, MIN_WINGSPAN, MAX_WINGSPAN);
+    }
+    
+    ImGui::SetNextItemWidth(180);
+    int fsrc = static_cast<int>(g_fuselageSource);
+    const char* fsrcItems[] = {"Auto", "acf_size_z", "cg range", "pilot eye Z", "Default", "Manual"};
+    if (ImGui::Combo("Fuselage Source##fsrc", &fsrc, fsrcItems, 6)) {
+        g_fuselageSource = static_cast<FuselageLengthSource>(fsrc);
+        ReadAircraftDimensions();
+        GenerateDynamicCameraShots();
+    }
+    ImGui::SetNextItemWidth(120);
+    if (ImGui::InputFloat("Fuselage (m)##fmanual", &g_manualFuselageLength, 0.5f, 1.0f, "%.1f")) {
+        g_manualFuselageLength = std::clamp(g_manualFuselageLength, MIN_FUSELAGE_LENGTH, MAX_FUSELAGE_LENGTH);
+    }
+    
+    ImGui::SetNextItemWidth(180);
+    int hsrc = static_cast<int>(g_heightSource);
+    const char* hsrcItems[] = {"Auto", "gear + pilot", "pilot eye", "Default", "Manual"};
+    if (ImGui::Combo("Height Source##hsrc", &hsrc, hsrcItems, 5)) {
+        g_heightSource = static_cast<HeightSource>(hsrc);
+        ReadAircraftDimensions();
+        GenerateDynamicCameraShots();
+    }
+    ImGui::SetNextItemWidth(120);
+    if (ImGui::InputFloat("Height (m)##hman", &g_manualHeight, 0.2f, 0.5f, "%.1f")) {
+        g_manualHeight = std::clamp(g_manualHeight, MIN_HEIGHT, MAX_HEIGHT);
+    }
+    
+    if (ImGui::SmallButton("Apply Manual Values")) {
+        g_wingspanSource = WingspanSource::Manual;
+        g_fuselageSource = FuselageLengthSource::Manual;
+        g_heightSource = HeightSource::Manual;
+        ReadAircraftDimensions();
+        GenerateDynamicCameraShots();
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Re-read dims")) {
+        ReadAircraftDimensions();
+        GenerateDynamicCameraShots();
+    }
+    ImGui::Text("Wingspan: %.1f m | Fuselage: %.1f m | Height: %.1f m", g_aircraftDims.wingspan, g_aircraftDims.fuselageLength, g_aircraftDims.height);
+    
+    ImGui::Spacing();
+    ImGui::SetNextItemWidth(180);
+    int shotType = static_cast<int>(g_debugShotType);
+    const char* shotTypeItems[] = {"Auto", "Cockpit", "External"};
+    if (ImGui::Combo("Next Shot Type##shottype", &shotType, shotTypeItems, 3)) {
+        g_debugShotType = static_cast<DebugShotType>(shotType);
+    }
+    ImGui::SetNextItemWidth(120);
+    int shotTypeRaw = static_cast<int>(g_debugShotType);
+    if (ImGui::InputInt("Next Shot Type (0-2)##shottypeint", &shotTypeRaw)) {
+        shotTypeRaw = std::clamp(shotTypeRaw, 0, 2);
+        g_debugShotType = static_cast<DebugShotType>(shotTypeRaw);
+    }
+    ImGui::SetNextItemWidth(120);
+    if (ImGui::InputInt("Next Shot Index##shotidx", &g_debugShotIndex)) {
+        if (g_debugShotIndex < -1) g_debugShotIndex = -1;
+    }
+    ImGui::SameLine();
+    if (ImGui::SmallButton("Force Next Shot")) {
+        g_currentShotTime = 0.0f;
+    }
+    
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+    
     ImGui::Text("Delay (seconds):");
     ImGui::SameLine();
     ImGui::SetNextItemWidth(100);
@@ -479,7 +602,11 @@ static void ReadAircraftDimensions() {
     // Method 1: Use acf_size_x for wingspan (most reliable)
     // This is the shadow/viewing distance size set in Plane Maker
     // ========================================
-    if (g_drAcfSizeX) {
+    if (g_wingspanSource == WingspanSource::Manual) {
+        g_aircraftDims.wingspan = g_manualWingspan;
+    } else if (g_wingspanSource == WingspanSource::Default) {
+        g_aircraftDims.wingspan = STANDARD_WINGSPAN;
+    } else if ((g_wingspanSource == WingspanSource::Auto || g_wingspanSource == WingspanSource::AcfSizeX) && g_drAcfSizeX) {
         float sizeX = XPLMGetDataf(g_drAcfSizeX);
         if (sizeX > 5.0f) {  // Reasonable minimum wingspan
             g_aircraftDims.wingspan = sizeX;
@@ -493,7 +620,7 @@ static void ReadAircraftDimensions() {
     // Method 2: Use acf_semilen for more precise wingspan calculation
     // Sum the maximum semi-lengths from each wing segment
     // ========================================
-    if (g_drAcfSemilenJND) {
+    if ((g_wingspanSource == WingspanSource::Auto || g_wingspanSource == WingspanSource::Semilen) && g_drAcfSemilenJND) {
         float semilenData[56];
         int count = XPLMGetDatavf(g_drAcfSemilenJND, semilenData, 0, 56);
         if (count > 0) {
@@ -506,7 +633,9 @@ static void ReadAircraftDimensions() {
             if (maxSemilen > 2.0f) {  // Minimum reasonable semi-span
                 float wingspan = maxSemilen * 2.0f;  // Full span = 2 * semi-span
                 // Only use if significantly different from size_x (could be more accurate)
-                if (wingspan > g_aircraftDims.wingspan * 0.8f && wingspan < g_aircraftDims.wingspan * 1.5f) {
+                if (g_wingspanSource == WingspanSource::Semilen) {
+                    g_aircraftDims.wingspan = wingspan;
+                } else if (wingspan > g_aircraftDims.wingspan * 0.8f && wingspan < g_aircraftDims.wingspan * 1.5f) {
                     // Values are close, prefer the larger one
                     if (wingspan > g_aircraftDims.wingspan) {
                         g_aircraftDims.wingspan = wingspan;
@@ -525,47 +654,77 @@ static void ReadAircraftDimensions() {
     // ========================================
     // Method 3: Use acf_size_z for fuselage length (most reliable)
     // ========================================
-    if (g_drAcfSizeZ) {
-        float sizeZ = XPLMGetDataf(g_drAcfSizeZ);
-        if (sizeZ > 5.0f) {  // Reasonable minimum length
-            g_aircraftDims.fuselageLength = sizeZ;
-            char msg[128];
-            snprintf(msg, sizeof(msg), "MovieCamera: Using acf_size_z for fuselage length: %.1fm\n", sizeZ);
-            XPLMDebugString(msg);
-        }
-    }
-    
-    // Fallback: Use CG limits if size_z didn't work
-    if (g_aircraftDims.fuselageLength < MIN_FUSELAGE_LENGTH + 1.0f) {
-        float cgZFwd = 0.0f, cgZAft = 0.0f;
-        if (g_drAcfCgZFwd) cgZFwd = XPLMGetDataf(g_drAcfCgZFwd);
-        if (g_drAcfCgZAft) cgZAft = XPLMGetDataf(g_drAcfCgZAft);
-        
-        if (cgZFwd != 0.0f || cgZAft != 0.0f) {
-            float cgRange = std::abs(cgZAft - cgZFwd);
-            if (cgRange > MIN_VALID_CG_RANGE) {
-                g_aircraftDims.fuselageLength = cgRange * CG_TO_FUSELAGE_MULTIPLIER;
+    bool lengthSet = false;
+    if (g_fuselageSource == FuselageLengthSource::Manual) {
+        g_aircraftDims.fuselageLength = g_manualFuselageLength;
+        lengthSet = true;
+    } else if (g_fuselageSource == FuselageLengthSource::Default) {
+        g_aircraftDims.fuselageLength = STANDARD_FUSELAGE_LENGTH;
+        lengthSet = true;
+    } else {
+        if ((g_fuselageSource == FuselageLengthSource::Auto || g_fuselageSource == FuselageLengthSource::AcfSizeZ) && g_drAcfSizeZ) {
+            float sizeZ = XPLMGetDataf(g_drAcfSizeZ);
+            if (sizeZ > 5.0f) {  // Reasonable minimum length
+                g_aircraftDims.fuselageLength = sizeZ;
+                lengthSet = true;
+                char msg[128];
+                snprintf(msg, sizeof(msg), "MovieCamera: Using acf_size_z for fuselage length: %.1fm\n", sizeZ);
+                XPLMDebugString(msg);
             }
         }
-    }
-    
-    // Alternative: Use pilot eye Z position to estimate aircraft size
-    if (g_aircraftDims.pilotEyeZ != 0.0f && g_aircraftDims.fuselageLength < MIN_FUSELAGE_LENGTH + 1.0f) {
-        g_aircraftDims.fuselageLength = std::abs(g_aircraftDims.pilotEyeZ) * PILOT_Z_TO_FUSELAGE_MULTIPLIER;
+        
+        if ((g_fuselageSource == FuselageLengthSource::Auto || g_fuselageSource == FuselageLengthSource::CgRange) && !lengthSet) {
+            float cgZFwd = 0.0f, cgZAft = 0.0f;
+            if (g_drAcfCgZFwd) cgZFwd = XPLMGetDataf(g_drAcfCgZFwd);
+            if (g_drAcfCgZAft) cgZAft = XPLMGetDataf(g_drAcfCgZAft);
+            
+            if (cgZFwd != 0.0f || cgZAft != 0.0f) {
+                float cgRange = std::abs(cgZAft - cgZFwd);
+                if (cgRange > MIN_VALID_CG_RANGE) {
+                    g_aircraftDims.fuselageLength = cgRange * CG_TO_FUSELAGE_MULTIPLIER;
+                    lengthSet = true;
+                }
+            }
+        }
+        
+        if ((g_fuselageSource == FuselageLengthSource::Auto || g_fuselageSource == FuselageLengthSource::PilotEyeZ) && !lengthSet) {
+            if (g_aircraftDims.pilotEyeZ != 0.0f) {
+                g_aircraftDims.fuselageLength = std::abs(g_aircraftDims.pilotEyeZ) * PILOT_Z_TO_FUSELAGE_MULTIPLIER;
+                lengthSet = true;
+            }
+        }
     }
     
     // ========================================
     // Height estimation
     // ========================================
-    float minY = 0.0f;
-    if (g_drAcfMinY) minY = XPLMGetDataf(g_drAcfMinY);
-    
-    if (minY != 0.0f && g_aircraftDims.pilotEyeY > 0.0f) {
-        // Calculate height from gear to pilot eye position, plus estimated distance above pilot
-        g_aircraftDims.height = g_aircraftDims.pilotEyeY - minY + ESTIMATED_GROUND_CLEARANCE;
-    } else if (g_aircraftDims.pilotEyeY > 0.0f) {
-        // Estimate height from pilot eye Y position plus ground clearance
-        g_aircraftDims.height = g_aircraftDims.pilotEyeY * PILOT_Y_TO_HEIGHT_MULTIPLIER + ESTIMATED_GROUND_CLEARANCE;
+    bool heightSet = false;
+    if (g_heightSource == HeightSource::Manual) {
+        g_aircraftDims.height = g_manualHeight;
+        heightSet = true;
+    } else if (g_heightSource == HeightSource::Default) {
+        g_aircraftDims.height = STANDARD_HEIGHT;
+        heightSet = true;
+    } else {
+        if (g_heightSource == HeightSource::Auto || g_heightSource == HeightSource::GearPlusPilot) {
+            float minY = 0.0f;
+            if (g_drAcfMinY) minY = XPLMGetDataf(g_drAcfMinY);
+            
+            if (minY != 0.0f && g_aircraftDims.pilotEyeY > 0.0f) {
+                g_aircraftDims.height = g_aircraftDims.pilotEyeY - minY + ESTIMATED_GROUND_CLEARANCE;
+                heightSet = true;
+            } else if (g_aircraftDims.pilotEyeY > 0.0f) {
+                g_aircraftDims.height = g_aircraftDims.pilotEyeY * PILOT_Y_TO_HEIGHT_MULTIPLIER + ESTIMATED_GROUND_CLEARANCE;
+                heightSet = true;
+            }
+        }
+        
+        if ((g_heightSource == HeightSource::Auto || g_heightSource == HeightSource::PilotEye) && !heightSet) {
+            if (g_aircraftDims.pilotEyeY > 0.0f) {
+                g_aircraftDims.height = g_aircraftDims.pilotEyeY * PILOT_Y_TO_HEIGHT_MULTIPLIER + ESTIMATED_GROUND_CLEARANCE;
+                heightSet = true;
+            }
+        }
     }
     
     // ========================================
@@ -1266,11 +1425,19 @@ static void SaveSettings() {
     }
     
     fprintf(file, "# MovieCamera Settings\n");
-    fprintf(file, "version 2\n");
+    fprintf(file, "version 4\n");
     fprintf(file, "delay_seconds %.1f\n", g_delaySeconds);
     fprintf(file, "auto_alt_ft %.0f\n", g_autoAltFt);
     fprintf(file, "shot_min_duration %.1f\n", g_shotMinDuration);
     fprintf(file, "shot_max_duration %.1f\n", g_shotMaxDuration);
+    fprintf(file, "wingspan_source %d\n", static_cast<int>(g_wingspanSource));
+    fprintf(file, "fuselage_source %d\n", static_cast<int>(g_fuselageSource));
+    fprintf(file, "height_source %d\n", static_cast<int>(g_heightSource));
+    fprintf(file, "manual_wingspan %.1f\n", g_manualWingspan);
+    fprintf(file, "manual_fuselage_length %.1f\n", g_manualFuselageLength);
+    fprintf(file, "manual_height %.1f\n", g_manualHeight);
+    fprintf(file, "debug_shot_type %d\n", static_cast<int>(g_debugShotType));
+    fprintf(file, "debug_shot_index %d\n", g_debugShotIndex);
     
     // Cinematic effects settings
     fprintf(file, "enable_fov_effect %d\n", g_enableFovEffect ? 1 : 0);
@@ -1309,6 +1476,26 @@ static void LoadSettings() {
             g_shotMinDuration = std::clamp(value, 1.0f, 30.0f);
         } else if (sscanf(line, "shot_max_duration %f", &value) == 1) {
             g_shotMaxDuration = std::clamp(value, 1.0f, 30.0f);
+        } else if (sscanf(line, "wingspan_source %d", &intValue) == 1) {
+            intValue = std::clamp(intValue, 0, 4);
+            g_wingspanSource = static_cast<WingspanSource>(intValue);
+        } else if (sscanf(line, "fuselage_source %d", &intValue) == 1) {
+            intValue = std::clamp(intValue, 0, 5);
+            g_fuselageSource = static_cast<FuselageLengthSource>(intValue);
+        } else if (sscanf(line, "height_source %d", &intValue) == 1) {
+            intValue = std::clamp(intValue, 0, 4);
+            g_heightSource = static_cast<HeightSource>(intValue);
+        } else if (sscanf(line, "manual_wingspan %f", &value) == 1) {
+            g_manualWingspan = std::clamp(value, MIN_WINGSPAN, MAX_WINGSPAN);
+        } else if (sscanf(line, "manual_fuselage_length %f", &value) == 1) {
+            g_manualFuselageLength = std::clamp(value, MIN_FUSELAGE_LENGTH, MAX_FUSELAGE_LENGTH);
+        } else if (sscanf(line, "manual_height %f", &value) == 1) {
+            g_manualHeight = std::clamp(value, MIN_HEIGHT, MAX_HEIGHT);
+        } else if (sscanf(line, "debug_shot_type %d", &intValue) == 1) {
+            intValue = std::clamp(intValue, 0, 2);
+            g_debugShotType = static_cast<DebugShotType>(intValue);
+        } else if (sscanf(line, "debug_shot_index %d", &intValue) == 1) {
+            g_debugShotIndex = std::max(-1, intValue);
         } else if (sscanf(line, "enable_fov_effect %d", &intValue) == 1) {
             g_enableFovEffect = (intValue != 0);
         } else if (sscanf(line, "base_fov %f", &value) == 1) {
@@ -1342,7 +1529,11 @@ static CameraShot SelectNextShot() {
     
     // Determine which shot type to use
     CameraType nextType;
-    if (canSwitchType) {
+    if (g_debugShotType == DebugShotType::Cockpit) {
+        nextType = CameraType::Cockpit;
+    } else if (g_debugShotType == DebugShotType::External) {
+        nextType = CameraType::External;
+    } else if (canSwitchType) {
         // Can switch types - randomly decide
         nextType = (std::rand() % 2 == 0) ? CameraType::Cockpit : CameraType::External;
     } else {
@@ -1372,10 +1563,14 @@ static CameraShot SelectNextShot() {
                 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
     }
     
-    int newIndex;
-    do {
-        newIndex = std::rand() % static_cast<int>(shotList->size());
-    } while (newIndex == g_currentShotIndex && shotList->size() > 1);
+    int newIndex = -1;
+    if (g_debugShotIndex >= 0 && g_debugShotIndex < static_cast<int>(shotList->size())) {
+        newIndex = g_debugShotIndex;
+    } else {
+        do {
+            newIndex = std::rand() % static_cast<int>(shotList->size());
+        } while (newIndex == g_currentShotIndex && shotList->size() > 1);
+    }
     
     g_currentShotIndex = newIndex;
     

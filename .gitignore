@@ -57,3 +57,5 @@ imgui-1.92.5/
 # Include SDK library files that would otherwise be ignored
 !SDK/Libraries/Lin/*.so
 !SDK/Libraries/Win/*.lib
+
+.cache
