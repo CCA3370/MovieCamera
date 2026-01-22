@@ -149,6 +149,7 @@ constexpr float MIN_CAMERA_DISTANCE_FROM_AIRCRAFT = 5.0f; // Minimum distance to
 constexpr float ZOOM_SCALE_FACTOR = 0.7f;                 // Base zoom factor scaled by aircraft size
 constexpr float EASE_IN_DURATION_RATIO = 0.3f;            // Ratio of shot duration for ease-in phase (30%)
 constexpr float CLOSE_DISTANCE_SCALE = 0.8f;              // Scale factor for close-up camera distances
+constexpr float DRIFT_DISTANCE_MULTIPLIER = 1.8f;
 
 /**
  * Aircraft dimensions structure
@@ -279,6 +280,7 @@ static float g_fovTransitionSpeed = 15.0f;         // FOV transition speed (degr
 static float g_handheldIntensity = 0.5f;           // Handheld camera shake intensity (0-1)
 static float g_originalHandheldCam = 0.0f;         // Store original handheld camera setting
 static float g_originalGloadedCam = 0.0f;          // Store original G-loaded camera setting
+static float g_lockedFov = DEFAULT_FOV_DEG;
 
 // Flight loop callback
 static XPLMFlightLoopID g_flightLoopId = nullptr;
@@ -1167,7 +1169,7 @@ static void TransformToWorldCoordinates(
  * Ease in-out cubic for smooth transitions
  */
 static float EaseInOutCubic(float t) {
-    return t < 0.5f ? 4.0f * t * t * t : 1.0f - std::pow(-2.0f * t + 2.0f, 3.0f) / 2.0f;
+    return std::clamp(t, 0.0f, 1.0f);
 }
 
 /**
@@ -1202,26 +1204,8 @@ static float EaseInCubic(float t) {
  * Once a drift direction is set, it maintains that direction throughout the shot
  */
 static float LinearDrift(float baseValue, float driftAmount, float normalizedTime) {
-    // Use ease-in only for smooth start without slowdown at end
-    // normalizedTime is 0 at start, 1 at end of shot
-    // Apply ease-in only for first portion (EASE_IN_DURATION_RATIO) of the shot, then linear progression
-    float smoothT;
-    if (normalizedTime < EASE_IN_DURATION_RATIO) {
-        // Ease-in phase: smooth acceleration using cubic easing
-        float t = normalizedTime / EASE_IN_DURATION_RATIO;  // Normalize to 0-1 for ease-in portion
-        smoothT = EaseInCubic(t) * EASE_IN_DURATION_RATIO;  // Scale back to 0-EASE_IN_DURATION_RATIO range
-    } else {
-        // Linear phase: constant speed until end (no deceleration)
-        // Calculate the derivative at the end of ease-in phase to ensure continuity
-        // Derivative of t^3 at t=1 is 3, so slope at transition is 3 * EASE_IN_DURATION_RATIO
-        // We continue from the ease-in endpoint with this slope
-        float slope = 3.0f * EASE_IN_DURATION_RATIO;  // Derivative of EaseInCubic(t) * EASE_IN_DURATION_RATIO at t=1
-        float easeInEndValue = EASE_IN_DURATION_RATIO;  // Value at end of ease-in phase (t^3 at t=1 = 1, scaled)
-        smoothT = easeInEndValue + slope * (normalizedTime - EASE_IN_DURATION_RATIO);
-    }
-    // Clamp smoothT to prevent overshooting beyond the intended drift amount
-    smoothT = std::min(smoothT, 1.0f);
-    return baseValue + driftAmount * smoothT;
+    float t = std::clamp(normalizedTime, 0.0f, 1.0f);
+    return baseValue + driftAmount * t;
 }
 
 /**
@@ -1325,6 +1309,16 @@ static float FovToFocalLength(float fovDeg) {
     if (fovDeg <= 0.0f || fovDeg >= 180.0f) fovDeg = 60.0f;  // Default to 60° if invalid
     float fovRad = fovDeg * PI / 180.0f;
     return SENSOR_WIDTH_MM / (2.0f * std::tan(fovRad / 2.0f));
+}
+
+static void SetFovImmediate(float targetFov) {
+    if (!g_drFovHorizontal) return;
+    g_currentFov = targetFov;
+    XPLMSetDataf(g_drFovHorizontal, g_currentFov);
+    if (g_drFovVertical) {
+        float vFov = 2.0f * std::atan(std::tan(g_currentFov * PI / 360.0f) * 9.0f / 16.0f) * 180.0f / PI;
+        XPLMSetDataf(g_drFovVertical, vFov);
+    }
 }
 
 /**
@@ -1581,6 +1575,7 @@ static CameraShot SelectNextShot() {
     // Store current shot for drift calculation
     g_currentShot = shot;
     g_shotElapsedTime = 0.0f;
+    g_lockedFov = g_baseFov;
     
     return shot;
 }
@@ -1671,6 +1666,9 @@ static void StartCameraControl() {
     
     // Save current camera effect state before taking control
     SaveCameraEffectState();
+    if (g_enableFovEffect) {
+        SetFovImmediate(g_lockedFov);
+    }
     
     // Apply initial handheld effect setting if enabled
     if (g_enableHandheldEffect && g_drHandheldCam) {
@@ -1784,9 +1782,9 @@ static int CameraControlCallback(XPLMCameraPosition_t* outCameraPosition, int in
         normalizedTime = std::clamp(normalizedTime, 0.0f, 1.0f);
         
         // Position drift with smooth ease-in only (no slowdown at end)
-        float driftedX = LinearDrift(g_currentShot.x, g_currentShot.driftX * g_currentShot.duration, normalizedTime);
-        float driftedY = LinearDrift(g_currentShot.y, g_currentShot.driftY * g_currentShot.duration, normalizedTime);
-        float driftedZ = LinearDrift(g_currentShot.z, g_currentShot.driftZ * g_currentShot.duration, normalizedTime);
+        float driftedX = LinearDrift(g_currentShot.x, g_currentShot.driftX * g_currentShot.duration * DRIFT_DISTANCE_MULTIPLIER, normalizedTime);
+        float driftedY = LinearDrift(g_currentShot.y, g_currentShot.driftY * g_currentShot.duration * DRIFT_DISTANCE_MULTIPLIER, normalizedTime);
+        float driftedZ = LinearDrift(g_currentShot.z, g_currentShot.driftZ * g_currentShot.duration * DRIFT_DISTANCE_MULTIPLIER, normalizedTime);
         
         // For cockpit shots, add pilot eye position as base offset
         // This ensures cockpit views are in the cockpit, not at the aircraft origin (CG)
@@ -1837,13 +1835,6 @@ static int CameraControlCallback(XPLMCameraPosition_t* outCameraPosition, int in
         outCameraPosition->heading = acfHeading + driftedHeading;
         outCameraPosition->roll = driftedRoll;
         outCameraPosition->zoom = driftedZoom;
-    }
-    
-    // Apply FOV effect if enabled
-    if (g_enableFovEffect && g_drFovHorizontal) {
-        // Use a small delta time estimate for smooth transitions
-        // (actual deltaTime would require tracking between frames)
-        ApplyFovEffect(g_baseFov, 0.016f);  // ~60fps assumed
     }
     
     return 1;
@@ -1950,6 +1941,9 @@ static float FlightLoopCallback(float inElapsedSinceLastCall, float inElapsedTim
                 g_inTransition = false;
                 g_transitionProgress = 0.0f;
                 g_currentShotTime = nextShot.duration;
+                if (g_enableFovEffect) {
+                    SetFovImmediate(g_lockedFov);
+                }
             }
         }
     }
